@@ -49,11 +49,10 @@ app.get('/api/videos', async (req, res) => {
       const { ListObjectsV2Command } = require('@aws-sdk/client-s3');
       const command = new ListObjectsV2Command({
         Bucket: S3_BUCKET,
-        Prefix: 'videos/',
       });
       const result = await s3Client.send(command);
       const videos = (result.Contents || [])
-        .filter(obj => !obj.Key.endsWith('/'))
+        .filter(obj => /\.(mp4|webm|ogg|mov|mkv|avi)$/i.test(obj.Key))
         .map(obj => ({
           key: obj.Key,
           name: obj.Key.replace(/^videos\//, ''),
