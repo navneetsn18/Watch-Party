@@ -70,7 +70,7 @@ app.get('/api/videos', async (req, res) => {
       return res.json([]);
     }
     const files = fs.readdirSync(videosDir)
-      .filter(f => /\.(mp4|webm|ogg|mov)$/i.test(f))
+      .filter(f => /\.(mp4|webm|ogg|mov|mkv)$/i.test(f))
       .map(f => {
         const stat = fs.statSync(path.join(videosDir, f));
         return {
@@ -126,6 +126,7 @@ app.get('/api/stream/:filename', (req, res) => {
     '.webm': 'video/webm',
     '.ogg': 'video/ogg',
     '.mov': 'video/quicktime',
+    '.mkv': 'video/x-matroska',
   };
   const contentType = contentTypes[ext] || 'video/mp4';
 

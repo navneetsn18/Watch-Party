@@ -305,7 +305,7 @@ function RoomContent({ roomId }) {
               <div className="video-list">
                 {videos.length === 0 ? (
                   <div style={{ color: 'var(--text-muted)', fontSize: '13px' }}>
-                    No videos found. Add .mp4 files to the videos/ folder.
+                    No videos found. Add .mp4 or .mkv files to the videos/ folder.
                   </div>
                 ) : (
                   videos.map((v) => (
