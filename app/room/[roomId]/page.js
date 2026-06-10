@@ -9,6 +9,7 @@ import TopBar from '../../../components/TopBar';
 import VideoPlayer from '../../../components/VideoPlayer';
 import ChatPanel from '../../../components/ChatPanel';
 import ShareModal from '../../../components/ShareModal';
+import GuestRequestModal from '../../../components/GuestRequestModal';
 
 function RoomContent({ roomId }) {
   const searchParams = useSearchParams();
@@ -25,6 +26,13 @@ function RoomContent({ roomId }) {
   const [activeTab, setActiveTab] = useState('chat');
   const [connected, setConnected] = useState(false);
 
+  // Fullscreen notifications
+  const [fsNotifications, setFsNotifications] = useState([]);
+  const fsNotifIdRef = useRef(0);
+
+  // Guest request queue (host side)
+  const [guestRequests, setGuestRequests] = useState([]);
+
   const socketRef = useRef(null);
   const playerRef = useRef(null);
   const pendingSyncRef = useRef(null);
@@ -39,6 +47,28 @@ function RoomContent({ roomId }) {
   const currentVideoKeyRef = useRef(currentVideoKey);
   useEffect(() => { showToastRef.current = showToast; }, [showToast]);
   useEffect(() => { currentVideoKeyRef.current = currentVideoKey; }, [currentVideoKey]);
+
+  // ── Push fullscreen notification ──
+  const pushFsNotification = useCallback(({ message, sender, isSystem }) => {
+    const id = ++fsNotifIdRef.current;
+    const notif = { id, message, sender, isSystem, exiting: false };
+    setFsNotifications(prev => [...prev.slice(-4), notif]); // keep max 5
+
+    // Start exit animation after 2s
+    setTimeout(() => {
+      setFsNotifications(prev =>
+        prev.map(n => n.id === id ? { ...n, exiting: true } : n)
+      );
+    }, 2000);
+
+    // Remove after exit animation (2s + 0.5s for animation)
+    setTimeout(() => {
+      setFsNotifications(prev => prev.filter(n => n.id !== id));
+    }, 2500);
+  }, []);
+
+  const pushFsNotificationRef = useRef(pushFsNotification);
+  useEffect(() => { pushFsNotificationRef.current = pushFsNotification; }, [pushFsNotification]);
 
   // ── Load video by key (stable — no state deps) ──
   const loadVideo = useCallback(async (key) => {
@@ -212,14 +242,32 @@ function RoomContent({ roomId }) {
     socket.on('chat-message', ({ sender, message, isSystem }) => {
       if (isSystem) {
         addSystemMessage(message);
+        // Push fullscreen notification for system messages (join/leave)
+        pushFsNotificationRef.current({ message, isSystem: true });
       } else {
         setMessages(prev => [...prev, { sender, message }]);
+        // Push fullscreen notification for chat messages
+        pushFsNotificationRef.current({ message, sender, isSystem: false });
       }
     });
 
     socket.on('reaction', ({ emoji }) => {
       const player = playerRef.current;
       if (player) player.spawnEmoji(emoji);
+    });
+
+    // ── Guest request events ──
+    socket.on('guest-request-received', (request) => {
+      // Host receives a guest request
+      setGuestRequests(prev => [...prev, request]);
+    });
+
+    socket.on('request-approved', ({ requestId, action }) => {
+      showToastRef.current(`✅ Host approved your ${action} request`);
+    });
+
+    socket.on('request-rejected', ({ requestId }) => {
+      showToastRef.current('❌ Host rejected your request');
     });
 
     return () => {
@@ -340,6 +388,37 @@ function RoomContent({ roomId }) {
     showToast('📋 Room code copied: ' + roomId);
   }
 
+  // ── Guest request action (guest side) ──
+  function handleRequestAction(action) {
+    const socket = socketRef.current;
+    if (!socket) return;
+    socket.emit('guest-request', { roomId, action });
+  }
+
+  // ── Host approve/reject guest requests ──
+  function handleApproveRequest(request) {
+    const socket = socketRef.current;
+    if (!socket) return;
+    socket.emit('host-approve-request', {
+      roomId,
+      requestId: request.id,
+      action: request.action,
+      guestId: request.guestId,
+    });
+    setGuestRequests(prev => prev.filter(r => r.id !== request.id));
+  }
+
+  function handleRejectRequest(request) {
+    const socket = socketRef.current;
+    if (!socket) return;
+    socket.emit('host-reject-request', {
+      roomId,
+      requestId: request.id,
+      guestId: request.guestId,
+    });
+    setGuestRequests(prev => prev.filter(r => r.id !== request.id));
+  }
+
   const canControl = isHost || guestControls;
 
   return (
@@ -366,6 +445,8 @@ function RoomContent({ roomId }) {
           onSeek={handleSeek}
           onLoadedMetadata={handleLoadedMetadata}
           onHostBuffering={handleHostBuffering}
+          fullscreenNotifications={fsNotifications}
+          onRequestAction={!canControl ? handleRequestAction : undefined}
         />
 
         <div className="sidebar">
@@ -442,6 +523,15 @@ function RoomContent({ roomId }) {
         isOpen={shareOpen}
         onClose={() => setShareOpen(false)}
       />
+
+      {/* Guest request approval popups (host only) */}
+      {isHost && (
+        <GuestRequestModal
+          requests={guestRequests}
+          onApprove={handleApproveRequest}
+          onReject={handleRejectRequest}
+        />
+      )}
     </div>
   );
 }

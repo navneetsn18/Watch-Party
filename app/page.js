@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, Suspense } from 'react';
+import { useState, useEffect, useRef, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { generateRoomId } from '../lib/utils';
 
@@ -9,7 +9,10 @@ function LobbyContent() {
   const searchParams = useSearchParams();
   const [username, setUsername] = useState('');
   const [roomCode, setRoomCode] = useState('');
+  const [customCode, setCustomCode] = useState('');
+  const [customCodeStatus, setCustomCodeStatus] = useState(null); // null | 'checking' | 'available' | 'taken' | 'invalid'
   const inviteRoom = searchParams.get('room');
+  const checkTimerRef = useRef(null);
 
   useEffect(() => {
     // Auto-focus the username input
@@ -17,9 +20,57 @@ function LobbyContent() {
     if (input) input.focus();
   }, []);
 
+  // Check custom code availability with debounce
+  useEffect(() => {
+    if (checkTimerRef.current) clearTimeout(checkTimerRef.current);
+
+    const code = customCode.trim().toUpperCase();
+    if (!code) {
+      setCustomCodeStatus(null);
+      return;
+    }
+
+    if (code.length < 3) {
+      setCustomCodeStatus('invalid');
+      return;
+    }
+
+    if (!/^[A-Z0-9]+$/.test(code)) {
+      setCustomCodeStatus('invalid');
+      return;
+    }
+
+    setCustomCodeStatus('checking');
+    checkTimerRef.current = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/check-room/${encodeURIComponent(code)}`);
+        const data = await res.json();
+        if (data.available) {
+          setCustomCodeStatus('available');
+        } else {
+          setCustomCodeStatus('taken');
+        }
+      } catch (err) {
+        setCustomCodeStatus(null);
+      }
+    }, 400);
+
+    return () => clearTimeout(checkTimerRef.current);
+  }, [customCode]);
+
   function createRoom() {
     const name = username.trim() || 'Host';
-    const id = generateRoomId();
+    const code = customCode.trim().toUpperCase();
+    // Use custom code if provided and available, otherwise generate
+    let id;
+    if (code && code.length >= 3 && /^[A-Z0-9]+$/.test(code) && customCodeStatus === 'available') {
+      id = code;
+    } else if (code && customCodeStatus !== 'available') {
+      // If custom code entered but not available, don't proceed
+      return;
+    } else {
+      id = generateRoomId();
+    }
     router.push(`/room/${id}?username=${encodeURIComponent(name)}`);
   }
 
@@ -79,7 +130,39 @@ function LobbyContent() {
         ) : (
           /* Host or manual join flow */
           <>
-            <button className="btn btn-primary" onClick={createRoom}>
+            {/* Custom room code (optional) */}
+            <div className="input-group custom-code-group">
+              <label className="input-label">Custom room code (optional)</label>
+              <input
+                type="text"
+                className="input-field"
+                placeholder="e.g. MOVIE-NIGHT"
+                maxLength={12}
+                value={customCode}
+                onChange={(e) => setCustomCode(e.target.value.toUpperCase().replace(/[^A-Z0-9-]/g, ''))}
+                onKeyDown={(e) => handleKeyDown(e, createRoom)}
+                style={{ textTransform: 'uppercase', letterSpacing: '1px' }}
+              />
+              {customCodeStatus && (
+                <div className={`code-availability ${customCodeStatus}`}>
+                  <span className="code-availability-dot" />
+                  {customCodeStatus === 'checking' && 'Checking availability…'}
+                  {customCodeStatus === 'available' && 'Code is available!'}
+                  {customCodeStatus === 'taken' && 'Code is already in use'}
+                  {customCodeStatus === 'invalid' && 'Min 3 alphanumeric characters'}
+                </div>
+              )}
+            </div>
+
+            <button
+              className="btn btn-primary"
+              onClick={createRoom}
+              disabled={customCode.trim() && customCodeStatus !== 'available'}
+              style={{
+                opacity: (customCode.trim() && customCodeStatus !== 'available') ? 0.5 : 1,
+                pointerEvents: (customCode.trim() && customCodeStatus !== 'available') ? 'none' : 'auto',
+              }}
+            >
               ✨ Create a room
             </button>
 
@@ -91,7 +174,7 @@ function LobbyContent() {
                 type="text"
                 className="input-field"
                 placeholder="e.g. ABC123"
-                maxLength={8}
+                maxLength={12}
                 value={roomCode}
                 onChange={(e) => setRoomCode(e.target.value.toUpperCase())}
                 onKeyDown={(e) => handleKeyDown(e, joinRoom)}

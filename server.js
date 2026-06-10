@@ -225,6 +225,18 @@ app.get('/api/stream/:filename', (req, res) => {
 // rooms = { roomId: { host, users: Map, state, guestControls } }
 const rooms = {};
 
+// ── Check room availability (for custom room codes) ─────────────────────────
+app.get('/api/check-room/:code', (req, res) => {
+  const code = req.params.code?.trim().toUpperCase();
+  if (!code) return res.status(400).json({ error: 'Missing code' });
+  if (!/^[A-Z0-9]{3,12}$/.test(code)) {
+    return res.json({ available: false, reason: 'Invalid format. Use 3-12 alphanumeric characters.' });
+  }
+  const room = rooms[code];
+  const inUse = room && room.users.size > 0;
+  res.json({ available: !inUse, code });
+});
+
 function getOrCreateRoom(roomId) {
   if (!rooms[roomId]) {
     rooms[roomId] = {
@@ -388,6 +400,70 @@ io.on('connection', (socket) => {
   socket.on('request-sync', ({ roomId }) => {
     const room = rooms[roomId];
     if (room) socket.emit('sync-state', room.state);
+  });
+
+  // ── Guest request (when guest controls are off) ───────────────────────────
+  socket.on('guest-request', ({ roomId, action }) => {
+    const room = rooms[roomId];
+    if (!room) return;
+    // Only guests can make requests, and only when guest controls are off
+    if (room.host === socket.id) return;
+    if (room.guestControls) return;
+
+    const userInfo = room.users.get(socket.id);
+    const username = userInfo?.username || 'Guest';
+    const requestId = `${socket.id}-${Date.now()}`;
+
+    // Forward request to host
+    io.to(room.host).emit('guest-request-received', {
+      id: requestId,
+      guestId: socket.id,
+      username,
+      action,
+    });
+
+    console.log(`[WS] Guest ${username} requested: ${action} in room ${roomId}`);
+  });
+
+  socket.on('host-approve-request', ({ roomId, requestId, action, guestId }) => {
+    const room = rooms[roomId];
+    if (!room || room.host !== socket.id) return;
+
+    const video = room.state;
+    // Execute the action
+    switch (action) {
+      case 'play':
+        room.state.playing = true;
+        room.state.lastUpdated = Date.now();
+        io.to(roomId).emit('play', { currentTime: video.currentTime });
+        break;
+      case 'pause':
+        room.state.playing = false;
+        room.state.lastUpdated = Date.now();
+        io.to(roomId).emit('pause', { currentTime: video.currentTime });
+        break;
+      case 'seek-forward':
+        room.state.currentTime = Math.min((video.currentTime || 0) + 10, 999999);
+        room.state.lastUpdated = Date.now();
+        io.to(roomId).emit('seek', { currentTime: room.state.currentTime, playing: room.state.playing });
+        break;
+      case 'seek-backward':
+        room.state.currentTime = Math.max((video.currentTime || 0) - 10, 0);
+        room.state.lastUpdated = Date.now();
+        io.to(roomId).emit('seek', { currentTime: room.state.currentTime, playing: room.state.playing });
+        break;
+    }
+
+    // Notify the guest
+    io.to(guestId).emit('request-approved', { requestId, action });
+    console.log(`[WS] Host approved ${action} request from ${guestId} in room ${roomId}`);
+  });
+
+  socket.on('host-reject-request', ({ roomId, requestId, guestId }) => {
+    const room = rooms[roomId];
+    if (!room || room.host !== socket.id) return;
+    io.to(guestId).emit('request-rejected', { requestId });
+    console.log(`[WS] Host rejected request ${requestId} from ${guestId} in room ${roomId}`);
   });
 
   // ── Chat message ──────────────────────────────────────────────────────────

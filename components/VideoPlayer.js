@@ -14,12 +14,19 @@ const VideoPlayer = forwardRef(function VideoPlayer({
   onSeek,
   onLoadedMetadata,
   onHostBuffering,
+  fullscreenNotifications = [],
+  onRequestAction,
 }, ref) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const scrubberRef = useRef(null);
   const skipRef = useRef(null);
   const playStateRef = useRef(null);
+
+  // Preview thumbnail refs
+  const previewVideoRef = useRef(null);
+  const previewCanvasRef = useRef(null);
+  const previewDebounceRef = useRef(null);
 
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -32,6 +39,13 @@ const VideoPlayer = forwardRef(function VideoPlayer({
   const [tooltipTime, setTooltipTime] = useState('0:00');
   const [tooltipLeft, setTooltipLeft] = useState(0);
   const [tooltipVisible, setTooltipVisible] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [requestSentFlash, setRequestSentFlash] = useState(null);
+
+  // Preview thumbnail state
+  const [previewVisible, setPreviewVisible] = useState(false);
+  const [previewLeft, setPreviewLeft] = useState(0);
+  const [previewReady, setPreviewReady] = useState(false);
 
   const scrubDownRef = useRef(false);
   const spawnEmoji = useEmojiSpawner(canvasRef);
@@ -42,12 +56,14 @@ const VideoPlayer = forwardRef(function VideoPlayer({
   const onPauseRef = useRef(onPause);
   const onSeekRef = useRef(onSeek);
   const onHostBufferingRef = useRef(onHostBuffering);
+  const onRequestActionRef = useRef(onRequestAction);
 
   useEffect(() => { canControlRef.current = canControl; }, [canControl]);
   useEffect(() => { onPlayRef.current = onPlay; }, [onPlay]);
   useEffect(() => { onPauseRef.current = onPause; }, [onPause]);
   useEffect(() => { onSeekRef.current = onSeek; }, [onSeek]);
   useEffect(() => { onHostBufferingRef.current = onHostBuffering; }, [onHostBuffering]);
+  useEffect(() => { onRequestActionRef.current = onRequestAction; }, [onRequestAction]);
 
   const playingRef = useRef(playing);
   useEffect(() => { playingRef.current = playing; }, [playing]);
@@ -59,6 +75,15 @@ const VideoPlayer = forwardRef(function VideoPlayer({
   const [hostBuffering, setHostBufferingState] = useState(false);
   const hostBufferingRef = useRef(false);
   useEffect(() => { hostBufferingRef.current = hostBuffering; }, [hostBuffering]);
+
+  // ── Fullscreen detection ──
+  useEffect(() => {
+    function handleFullscreenChange() {
+      setIsFullscreen(!!document.fullscreenElement);
+    }
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
+  }, []);
 
   useImperativeHandle(ref, () => ({
     play: () => {
@@ -234,6 +259,34 @@ const VideoPlayer = forwardRef(function VideoPlayer({
     setPlaying(false);
   }, [videoUrl]);
 
+  // ── Load preview video for thumbnails ──
+  useEffect(() => {
+    if (!videoUrl) {
+      setPreviewReady(false);
+      return;
+    }
+    const previewVideo = document.createElement('video');
+    previewVideo.preload = 'metadata';
+    previewVideo.muted = true;
+    previewVideo.src = videoUrl;
+    previewVideo.crossOrigin = 'anonymous';
+    previewVideoRef.current = previewVideo;
+
+    function onLoaded() {
+      setPreviewReady(true);
+    }
+    previewVideo.addEventListener('loadeddata', onLoaded);
+
+    return () => {
+      previewVideo.removeEventListener('loadeddata', onLoaded);
+      previewVideo.pause();
+      previewVideo.removeAttribute('src');
+      previewVideo.load();
+      previewVideoRef.current = null;
+      setPreviewReady(false);
+    };
+  }, [videoUrl]);
+
   // Sync playback with host buffering state
   useEffect(() => {
     const video = videoRef.current;
@@ -259,13 +312,26 @@ const VideoPlayer = forwardRef(function VideoPlayer({
       switch (e.code) {
         case 'Space':
           e.preventDefault();
-          if (canControlRef.current) togglePlay();
+          if (canControlRef.current) {
+            togglePlay();
+          } else if (onRequestActionRef.current) {
+            const video = videoRef.current;
+            onRequestActionRef.current(video && !video.paused ? 'pause' : 'play');
+          }
           break;
         case 'ArrowRight':
-          if (canControlRef.current) skipForward();
+          if (canControlRef.current) {
+            skipForward();
+          } else if (onRequestActionRef.current) {
+            onRequestActionRef.current('seek-forward');
+          }
           break;
         case 'ArrowLeft':
-          if (canControlRef.current) skipBack();
+          if (canControlRef.current) {
+            skipBack();
+          } else if (onRequestActionRef.current) {
+            onRequestActionRef.current('seek-backward');
+          }
           break;
         case 'KeyM':
           toggleMute();
@@ -282,14 +348,27 @@ const VideoPlayer = forwardRef(function VideoPlayer({
 
   // ── Controls ──
   function togglePlay() {
-    if (!canControlRef.current) return;
+    if (!canControlRef.current) {
+      if (onRequestActionRef.current) {
+        const video = videoRef.current;
+        onRequestActionRef.current(video && !video.paused ? 'pause' : 'play');
+        flashRequestSent();
+      }
+      return;
+    }
     const video = videoRef.current;
     if (!video) return;
     video.paused ? video.play().catch(() => {}) : video.pause();
   }
 
   function skipForward() {
-    if (!canControlRef.current) return;
+    if (!canControlRef.current) {
+      if (onRequestActionRef.current) {
+        onRequestActionRef.current('seek-forward');
+        flashRequestSent();
+      }
+      return;
+    }
     const video = videoRef.current;
     if (!video) return;
     video.currentTime = Math.min(video.duration || 0, video.currentTime + 10);
@@ -298,12 +377,23 @@ const VideoPlayer = forwardRef(function VideoPlayer({
   }
 
   function skipBack() {
-    if (!canControlRef.current) return;
+    if (!canControlRef.current) {
+      if (onRequestActionRef.current) {
+        onRequestActionRef.current('seek-backward');
+        flashRequestSent();
+      }
+      return;
+    }
     const video = videoRef.current;
     if (!video) return;
     video.currentTime = Math.max(0, video.currentTime - 10);
     onSeekRef.current(video.currentTime);
     flashSkip('−10');
+  }
+
+  function flashRequestSent() {
+    setRequestSentFlash(Date.now());
+    setTimeout(() => setRequestSentFlash(null), 1800);
   }
 
   function flashSkip(label) {
@@ -390,13 +480,40 @@ const VideoPlayer = forwardRef(function VideoPlayer({
     if (!video || !scrubber) return;
     const rect = scrubber.getBoundingClientRect();
     const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-    setTooltipTime(formatTime(pct * (video.duration || 0)));
+    const hoverTime = pct * (video.duration || 0);
+    setTooltipTime(formatTime(hoverTime));
     setTooltipLeft(pct * 100);
     setTooltipVisible(true);
+
+    // Generate preview thumbnail
+    setPreviewLeft(pct * 100);
+    setPreviewVisible(true);
+
+    if (previewReady && previewVideoRef.current) {
+      clearTimeout(previewDebounceRef.current);
+      previewDebounceRef.current = setTimeout(() => {
+        const pv = previewVideoRef.current;
+        const canvas = previewCanvasRef.current;
+        if (!pv || !canvas) return;
+        pv.currentTime = hoverTime;
+        pv.onseeked = () => {
+          try {
+            const ctx = canvas.getContext('2d');
+            canvas.width = 160;
+            canvas.height = 90;
+            ctx.drawImage(pv, 0, 0, 160, 90);
+          } catch (err) {
+            // Cross-origin or other error — silently fail
+          }
+        };
+      }, 60);
+    }
   }
 
   function handleScrubberMouseLeave() {
     setTooltipVisible(false);
+    setPreviewVisible(false);
+    clearTimeout(previewDebounceRef.current);
   }
 
   // Progress values
@@ -423,9 +540,49 @@ const VideoPlayer = forwardRef(function VideoPlayer({
         {/* Skip indicator */}
         <div className="skip-indicator" ref={skipRef} />
 
+        {/* Guest request sent flash */}
+        {requestSentFlash && (
+          <div className="guest-request-sent" key={requestSentFlash}>
+            🙋 Request sent to host
+          </div>
+        )}
+
         {/* Guest lock overlay — only blocks the video, NOT the sidebar */}
         {!canControl && (
-          <div className="guest-lock-overlay active" title="Only host can control playback" />
+          <div
+            className="guest-lock-overlay active"
+            title="Click to request control from host"
+            onClick={() => {
+              if (onRequestActionRef.current) {
+                const video = videoRef.current;
+                onRequestActionRef.current(video && !video.paused ? 'pause' : 'play');
+                flashRequestSent();
+              }
+            }}
+            style={{ cursor: onRequestAction ? 'pointer' : 'not-allowed' }}
+          />
+        )}
+
+        {/* Fullscreen notifications */}
+        {isFullscreen && fullscreenNotifications.length > 0 && (
+          <div className="fullscreen-notification-stack">
+            {fullscreenNotifications.map((notif) => (
+              <div
+                key={notif.id}
+                className={`fullscreen-notification ${notif.exiting ? 'exiting' : ''}`}
+              >
+                <span className="fullscreen-notification-icon">
+                  {notif.isSystem ? '🔔' : '💬'}
+                </span>
+                <div className="fullscreen-notification-body">
+                  {notif.sender && !notif.isSystem && (
+                    <span className="fullscreen-notification-sender">{notif.sender}</span>
+                  )}
+                  <span className="fullscreen-notification-text">{notif.message}</span>
+                </div>
+              </div>
+            ))}
+          </div>
         )}
 
         {/* No video placeholder */}
@@ -465,15 +622,32 @@ const VideoPlayer = forwardRef(function VideoPlayer({
             <div className="scrubber-fill" style={{ width: progressPct + '%' }} />
             <div className="scrubber-thumb" style={{ left: progressPct + '%' }} />
           </div>
-          <div
-            className="scrubber-tooltip"
-            style={{
-              left: tooltipLeft + '%',
-              opacity: tooltipVisible ? 1 : 0,
-            }}
-          >
-            {tooltipTime}
-          </div>
+
+          {/* Preview thumbnail */}
+          {previewReady && (
+            <div
+              className={`scrubber-preview ${previewVisible ? 'visible' : ''}`}
+              style={{ left: previewLeft + '%' }}
+            >
+              <div className="scrubber-preview-img">
+                <canvas ref={previewCanvasRef} width="160" height="90" />
+              </div>
+              <span className="scrubber-preview-time">{tooltipTime}</span>
+            </div>
+          )}
+
+          {/* Fallback time tooltip (only when preview not ready) */}
+          {!previewReady && (
+            <div
+              className="scrubber-tooltip"
+              style={{
+                left: tooltipLeft + '%',
+                opacity: tooltipVisible ? 1 : 0,
+              }}
+            >
+              {tooltipTime}
+            </div>
+          )}
         </div>
 
         {/* Controls row */}
@@ -482,7 +656,7 @@ const VideoPlayer = forwardRef(function VideoPlayer({
           <button className="ctrl-btn" onClick={skipBack} title="Back 10s">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
               <path d="M11.99 5V1l-5 5 5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6h-2c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/>
-              <text x="9.5" y="16" fontSize="7" fontWeight="bold" fill="currentColor" textAnchor="middle">10</text>
+              <path d="M10.89 16h-.85v-3.26l-1.01.31v-.69l1.77-.63h.09V16zm3.32 0c-.41 0-.74-.11-.96-.34-.22-.23-.34-.55-.34-.96v-1.37c0-.41.12-.73.34-.96.22-.23.55-.34.96-.34.41 0 .73.11.95.34.22.23.34.55.34.96v1.37c0 .41-.11.73-.34.96-.22.23-.54.34-.95.34zm.48-2.32c0-.42-.19-.63-.48-.63-.3 0-.48.21-.48.63v1.45c0 .42.18.63.48.63.29 0 .48-.21.48-.63v-1.45z"/>
             </svg>
           </button>
 
@@ -503,7 +677,7 @@ const VideoPlayer = forwardRef(function VideoPlayer({
           <button className="ctrl-btn" onClick={skipForward} title="Forward 10s">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor">
               <path d="M18 13c0 3.31-2.69 6-6 6s-6-2.69-6-6h-2c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8V1l-5 5 5 5V7c3.31 0 6 2.69 6 6z"/>
-              <text x="13.5" y="16" fontSize="7" fontWeight="bold" fill="currentColor" textAnchor="middle">10</text>
+              <path d="M10.89 16h-.85v-3.26l-1.01.31v-.69l1.77-.63h.09V16zm3.32 0c-.41 0-.74-.11-.96-.34-.22-.23-.34-.55-.34-.96v-1.37c0-.41.12-.73.34-.96.22-.23.55-.34.96-.34.41 0 .73.11.95.34.22.23.34.55.34.96v1.37c0 .41-.11.73-.34.96-.22.23-.54.34-.95.34zm.48-2.32c0-.42-.19-.63-.48-.63-.3 0-.48.21-.48.63v1.45c0 .42.18.63.48.63.29 0 .48-.21.48-.63v-1.45z"/>
             </svg>
           </button>
 
