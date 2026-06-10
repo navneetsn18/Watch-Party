@@ -18,6 +18,7 @@ export default function ChatPanel({
 }) {
   const [inputValue, setInputValue] = useState('');
   const [emojiOpen, setEmojiOpen] = useState(false);
+  const [emojiMode, setEmojiMode] = useState('insert'); // 'insert' or 'react'
   const messagesRef = useRef(null);
   const inputRef = useRef(null);
   const emojiWrapRef = useRef(null);
@@ -74,6 +75,14 @@ export default function ChatPanel({
     }, 0);
   }
 
+  function handleEmojiClick(em) {
+    if (emojiMode === 'react') {
+      onSendReaction(em);
+    } else {
+      insertEmoji(em);
+    }
+  }
+
   function escapeHtml(str) {
     return String(str)
       .replace(/&/g, '&amp;')
@@ -128,6 +137,21 @@ export default function ChatPanel({
               😊 ＋
             </button>
             <div className={`emoji-panel ${emojiOpen ? 'open' : ''}`}>
+              {/* Mode tabs */}
+              <div className="emoji-mode-tabs">
+                <button
+                  className={`emoji-mode-tab ${emojiMode === 'insert' ? 'active' : ''}`}
+                  onClick={() => setEmojiMode('insert')}
+                >
+                  💬 Insert in Chat
+                </button>
+                <button
+                  className={`emoji-mode-tab ${emojiMode === 'react' ? 'active' : ''}`}
+                  onClick={() => setEmojiMode('react')}
+                >
+                  🎉 Send as Reaction
+                </button>
+              </div>
               {Object.entries(EMOJI_DATA).map(([category, emojis]) => (
                 <div key={category}>
                   <div className="emoji-cat-label">{category}</div>
@@ -136,7 +160,7 @@ export default function ChatPanel({
                       <span
                         key={em}
                         className="emoji-item"
-                        onClick={() => insertEmoji(em)}
+                        onClick={() => handleEmojiClick(em)}
                       >
                         {em}
                       </span>

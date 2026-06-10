@@ -428,6 +428,7 @@ function RoomContent({ roomId }) {
         userCount={userCount}
         isHost={isHost}
         guestControls={guestControls}
+        videoName={currentVideoKey ? currentVideoKey.replace(/^videos\//, '') : null}
         onToggleGuestControls={handleToggleGuestControls}
         onShareClick={() => setShareOpen(true)}
         onCopyRoomId={handleCopyRoomId}
@@ -447,6 +448,9 @@ function RoomContent({ roomId }) {
           onHostBuffering={handleHostBuffering}
           fullscreenNotifications={fsNotifications}
           onRequestAction={!canControl ? handleRequestAction : undefined}
+          guestRequests={guestRequests}
+          onApproveRequest={handleApproveRequest}
+          onRejectRequest={handleRejectRequest}
         />
 
         <div className="sidebar">

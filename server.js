@@ -5,14 +5,25 @@ const http = require('http');
 const { Server } = require('socket.io');
 const next = require('next');
 const fs = require('fs');
+const crypto = require('crypto');
+const { execSync, spawn } = require('child_process');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 const dev = process.env.NODE_ENV !== 'production';
 const PORT = process.env.PORT || 3000;
 const VIDEO_SOURCE = (process.env.VIDEO_SOURCE || 'local').trim();
 
+// Detect FFmpeg
+let FFMPEG_PATH = null;
+try {
+  FFMPEG_PATH = execSync('which ffmpeg', { encoding: 'utf-8' }).trim();
+  console.log(`[DEBUG] FFmpeg found at: ${FFMPEG_PATH}`);
+} catch {
+  console.log('[DEBUG] FFmpeg not found. HLS transcoding will be disabled.');
+}
+
 console.log('[DEBUG] --- Server Starting ---');
-console.log(`[DEBUG] VIDEO_SOURCE resolved to: "${VIDEO_SOURCE}"`);
+console.log(`[DEBUG] VIDEO_SOURCE resolved to: "${VIDEO_SOURCE}"`);  
 
 // S3 support (optional)
 let s3Client, GetObjectCommand, getSignedUrl, S3_BUCKET;
@@ -99,7 +110,7 @@ app.get('/api/videos', async (req, res) => {
   }
 });
 
-// Get a video URL (pre-signed for S3, direct path for local)
+// Get a video URL (pre-signed for S3, direct path for local, HLS if available)
 app.get('/api/video-url', async (req, res) => {
   const key = req.query.key;
   if (!key) return res.status(400).json({ error: 'Missing key' });
@@ -126,7 +137,15 @@ app.get('/api/video-url', async (req, res) => {
       return res.json({ url, source: 's3' });
     }
 
-    // Local: return the streaming endpoint
+    // Local: check if HLS version exists
+    const baseName = path.parse(key).name;
+    const hlsDir = path.join(__dirname, 'videos', 'hls', baseName);
+    const hlsManifest = path.join(hlsDir, 'index.m3u8');
+    if (fs.existsSync(hlsManifest)) {
+      return res.json({ url: `/api/hls/${encodeURIComponent(baseName)}/index.m3u8`, source: 'hls' });
+    }
+
+    // Fallback: range streaming
     res.json({ url: `/api/stream/${encodeURIComponent(key)}`, source: 'local' });
   } catch (err) {
     console.error('[API] Error getting video URL:', err);
@@ -218,6 +237,241 @@ app.get('/api/stream/:filename', (req, res) => {
       }
     });
     file.pipe(res);
+  }
+});
+
+// ─── HLS Segment Serving ────────────────────────────────────────────────────
+app.get('/api/hls/:videoname/:file', (req, res) => {
+  const { videoname, file } = req.params;
+  const safeName = decodeURIComponent(videoname).replace(/[^a-zA-Z0-9_\-. ]/g, '');
+  const safeFile = decodeURIComponent(file).replace(/[^a-zA-Z0-9_\-.]/g, '');
+  const filePath = path.join(__dirname, 'videos', 'hls', safeName, safeFile);
+
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: 'HLS file not found' });
+  }
+
+  const ext = path.extname(safeFile).toLowerCase();
+  const mimeTypes = {
+    '.m3u8': 'application/vnd.apple.mpegurl',
+    '.ts': 'video/mp2t',
+  };
+  const contentType = mimeTypes[ext] || 'application/octet-stream';
+
+  const stat = fs.statSync(filePath);
+  res.writeHead(200, {
+    'Content-Type': contentType,
+    'Content-Length': stat.size,
+    'Cache-Control': ext === '.m3u8' ? 'no-cache' : 'public, max-age=31536000',
+    'Access-Control-Allow-Origin': '*',
+  });
+  fs.createReadStream(filePath).pipe(res);
+});
+
+// ─── Chunked Upload System ──────────────────────────────────────────────────
+const uploads = {}; // { uploadId: { filename, totalChunks, receivedChunks, tmpDir, status } }
+
+// Initialize an upload session
+app.post('/api/upload/init', express.json(), (req, res) => {
+  const { filename, totalChunks, fileSize } = req.body;
+  if (!filename || !totalChunks) {
+    return res.status(400).json({ error: 'Missing filename or totalChunks' });
+  }
+
+  // Validate file extension
+  if (!/\.(mp4|webm|ogg|mov|mkv|avi)$/i.test(filename)) {
+    return res.status(400).json({ error: 'Invalid file type. Supported: mp4, webm, ogg, mov, mkv, avi' });
+  }
+
+  const uploadId = crypto.randomUUID();
+  const tmpDir = path.join(__dirname, 'videos', 'tmp', uploadId);
+  fs.mkdirSync(tmpDir, { recursive: true });
+
+  uploads[uploadId] = {
+    filename: filename.replace(/[^a-zA-Z0-9_\-.() ]/g, '_'),
+    totalChunks: parseInt(totalChunks, 10),
+    fileSize: parseInt(fileSize, 10) || 0,
+    receivedChunks: new Set(),
+    tmpDir,
+    status: 'uploading',
+    createdAt: Date.now(),
+  };
+
+  console.log(`[UPLOAD] Initialized: ${uploadId} | File: ${filename} | Chunks: ${totalChunks}`);
+  res.json({ uploadId, status: 'ready' });
+});
+
+// Receive a chunk
+app.post('/api/upload/chunk', (req, res) => {
+  const uploadId = req.headers['x-upload-id'];
+  const chunkIndex = parseInt(req.headers['x-chunk-index'], 10);
+
+  if (!uploadId || isNaN(chunkIndex)) {
+    return res.status(400).json({ error: 'Missing upload ID or chunk index' });
+  }
+
+  const upload = uploads[uploadId];
+  if (!upload) {
+    return res.status(404).json({ error: 'Upload session not found' });
+  }
+
+  const chunkPath = path.join(upload.tmpDir, `chunk_${String(chunkIndex).padStart(6, '0')}`);
+  const writeStream = fs.createWriteStream(chunkPath);
+
+  req.pipe(writeStream);
+
+  writeStream.on('finish', () => {
+    upload.receivedChunks.add(chunkIndex);
+    const progress = Math.round((upload.receivedChunks.size / upload.totalChunks) * 100);
+    console.log(`[UPLOAD] ${uploadId} | Chunk ${chunkIndex + 1}/${upload.totalChunks} (${progress}%)`);
+    res.json({ received: chunkIndex, progress });
+  });
+
+  writeStream.on('error', (err) => {
+    console.error(`[UPLOAD] Write error: ${err.message}`);
+    res.status(500).json({ error: 'Failed to write chunk' });
+  });
+});
+
+// Complete upload — assemble chunks and start HLS transcoding
+app.post('/api/upload/complete', express.json(), async (req, res) => {
+  const { uploadId } = req.body;
+  if (!uploadId) return res.status(400).json({ error: 'Missing uploadId' });
+
+  const upload = uploads[uploadId];
+  if (!upload) return res.status(404).json({ error: 'Upload not found' });
+
+  // Check all chunks received
+  if (upload.receivedChunks.size < upload.totalChunks) {
+    return res.status(400).json({
+      error: `Missing chunks: received ${upload.receivedChunks.size}/${upload.totalChunks}`,
+    });
+  }
+
+  upload.status = 'assembling';
+  console.log(`[UPLOAD] Assembling ${upload.totalChunks} chunks for: ${upload.filename}`);
+
+  try {
+    // Assemble chunks
+    const videosDir = path.join(__dirname, 'videos');
+    if (!fs.existsSync(videosDir)) fs.mkdirSync(videosDir, { recursive: true });
+
+    const finalPath = path.join(videosDir, upload.filename);
+    const writeStream = fs.createWriteStream(finalPath);
+
+    for (let i = 0; i < upload.totalChunks; i++) {
+      const chunkPath = path.join(upload.tmpDir, `chunk_${String(i).padStart(6, '0')}`);
+      const chunkData = fs.readFileSync(chunkPath);
+      writeStream.write(chunkData);
+    }
+
+    await new Promise((resolve, reject) => {
+      writeStream.on('finish', resolve);
+      writeStream.on('error', reject);
+      writeStream.end();
+    });
+
+    // Clean up tmp chunks
+    fs.rmSync(upload.tmpDir, { recursive: true, force: true });
+    console.log(`[UPLOAD] Assembled successfully: ${upload.filename}`);
+
+    // Start HLS transcoding if FFmpeg is available
+    if (FFMPEG_PATH) {
+      upload.status = 'transcoding';
+      const baseName = path.parse(upload.filename).name;
+      const hlsDir = path.join(videosDir, 'hls', baseName);
+      fs.mkdirSync(hlsDir, { recursive: true });
+
+      const hlsOutput = path.join(hlsDir, 'index.m3u8');
+      const ext = path.extname(upload.filename).toLowerCase();
+
+      // Use codec copy for MP4 (fast), re-encode for others
+      const ffmpegArgs = ext === '.mp4'
+        ? [
+            '-i', finalPath,
+            '-codec', 'copy',
+            '-start_number', '0',
+            '-hls_time', '4',
+            '-hls_list_size', '0',
+            '-hls_segment_filename', path.join(hlsDir, 'segment%03d.ts'),
+            '-f', 'hls',
+            hlsOutput,
+          ]
+        : [
+            '-i', finalPath,
+            '-c:v', 'libx264',
+            '-c:a', 'aac',
+            '-preset', 'fast',
+            '-crf', '23',
+            '-start_number', '0',
+            '-hls_time', '4',
+            '-hls_list_size', '0',
+            '-hls_segment_filename', path.join(hlsDir, 'segment%03d.ts'),
+            '-f', 'hls',
+            hlsOutput,
+          ];
+
+      console.log(`[HLS] Starting transcoding: ${upload.filename}`);
+
+      const ffmpeg = spawn(FFMPEG_PATH, ffmpegArgs);
+      let ffmpegStderr = '';
+
+      ffmpeg.stderr.on('data', (data) => {
+        ffmpegStderr += data.toString();
+        // Parse progress from FFmpeg output
+        const timeMatch = data.toString().match(/time=(\d{2}):(\d{2}):(\d{2})/);
+        if (timeMatch) {
+          const secs = parseInt(timeMatch[1]) * 3600 + parseInt(timeMatch[2]) * 60 + parseInt(timeMatch[3]);
+          io.emit('transcode-progress', { uploadId, filename: upload.filename, seconds: secs });
+        }
+      });
+
+      ffmpeg.on('close', (code) => {
+        if (code === 0) {
+          upload.status = 'complete';
+          console.log(`[HLS] Transcoding complete: ${upload.filename}`);
+          io.emit('transcode-complete', { uploadId, filename: upload.filename });
+        } else {
+          upload.status = 'error';
+          console.error(`[HLS] Transcoding failed (code ${code}): ${upload.filename}`);
+          console.error(`[HLS] FFmpeg stderr (last 500 chars): ${ffmpegStderr.slice(-500)}`);
+          io.emit('transcode-error', { uploadId, filename: upload.filename });
+        }
+      });
+
+      res.json({ status: 'transcoding', uploadId, filename: upload.filename });
+    } else {
+      upload.status = 'complete';
+      res.json({ status: 'complete', uploadId, filename: upload.filename });
+    }
+  } catch (err) {
+    upload.status = 'error';
+    console.error(`[UPLOAD] Assembly error: ${err.message}`);
+    res.status(500).json({ error: 'Failed to assemble upload', details: err.message });
+  }
+});
+
+// Check upload/transcode status
+app.get('/api/upload/status/:uploadId', (req, res) => {
+  const upload = uploads[req.params.uploadId];
+  if (!upload) return res.status(404).json({ error: 'Not found' });
+  res.json({ status: upload.status, filename: upload.filename });
+});
+
+// Delete a video
+app.delete('/api/videos/:filename', (req, res) => {
+  const filename = decodeURIComponent(req.params.filename);
+  const safeName = filename.replace(/[^a-zA-Z0-9_\-.() ]/g, '');
+  const filePath = path.join(__dirname, 'videos', safeName);
+  const baseName = path.parse(safeName).name;
+  const hlsDir = path.join(__dirname, 'videos', 'hls', baseName);
+
+  try {
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    if (fs.existsSync(hlsDir)) fs.rmSync(hlsDir, { recursive: true, force: true });
+    res.json({ deleted: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

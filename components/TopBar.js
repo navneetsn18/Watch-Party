@@ -5,6 +5,7 @@ export default function TopBar({
   userCount,
   isHost,
   guestControls,
+  videoName,
   onToggleGuestControls,
   onShareClick,
   onCopyRoomId,
@@ -20,6 +21,11 @@ export default function TopBar({
         >
           Room: {roomId || '------'}
         </span>
+        {videoName && (
+          <span className="topbar-video-name" title={videoName}>
+            ▶ {videoName}
+          </span>
+        )}
       </div>
 
       <div className="topbar-right">

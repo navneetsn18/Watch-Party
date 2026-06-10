@@ -188,6 +188,10 @@ function LobbyContent() {
           </>
         )}
       </div>
+
+      <button className="btn btn-upload-lobby" onClick={() => router.push('/upload')}>
+        📤 Upload a Video
+      </button>
     </div>
   );
 }

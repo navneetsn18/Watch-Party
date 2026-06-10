@@ -3,6 +3,10 @@
 import { useRef, useState, useEffect, useCallback, forwardRef, useImperativeHandle } from 'react';
 import { formatTime } from '../lib/utils';
 import EmojiReactions, { useEmojiSpawner } from './EmojiReactions';
+import GuestRequestModal from './GuestRequestModal';
+import Hls from 'hls.js';
+
+const SPEED_OPTIONS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
 
 const VideoPlayer = forwardRef(function VideoPlayer({
   videoUrl,
@@ -16,12 +20,16 @@ const VideoPlayer = forwardRef(function VideoPlayer({
   onHostBuffering,
   fullscreenNotifications = [],
   onRequestAction,
+  guestRequests = [],
+  onApproveRequest,
+  onRejectRequest,
 }, ref) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const scrubberRef = useRef(null);
   const skipRef = useRef(null);
   const playStateRef = useRef(null);
+  const hlsRef = useRef(null);
 
   // Preview thumbnail refs
   const previewVideoRef = useRef(null);
@@ -41,6 +49,8 @@ const VideoPlayer = forwardRef(function VideoPlayer({
   const [tooltipVisible, setTooltipVisible] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [requestSentFlash, setRequestSentFlash] = useState(null);
+  const [playbackRate, setPlaybackRate] = useState(1);
+  const [speedMenuOpen, setSpeedMenuOpen] = useState(false);
 
   // Preview thumbnail state
   const [previewVisible, setPreviewVisible] = useState(false);
@@ -248,15 +258,63 @@ const VideoPlayer = forwardRef(function VideoPlayer({
     };
   }, [isHost]); // only isSyncing ref identity (stable)
 
-  // ── Load video ──
+  // ── Load video (with HLS support) ──
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !videoUrl) return;
-    video.src = videoUrl;
-    video.load();
+
+    // Destroy previous HLS instance
+    if (hlsRef.current) {
+      hlsRef.current.destroy();
+      hlsRef.current = null;
+    }
+
+    const isHLS = videoUrl.endsWith('.m3u8');
+
+    if (isHLS && Hls.isSupported()) {
+      // Use hls.js for HLS streams
+      const hls = new Hls({
+        maxBufferLength: 30,
+        maxMaxBufferLength: 60,
+        startLevel: -1, // auto quality
+        enableWorker: true,
+      });
+      hlsRef.current = hls;
+      hls.loadSource(videoUrl);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        console.log('[HLS] Manifest parsed, ready to play');
+      });
+      hls.on(Hls.Events.ERROR, (event, data) => {
+        if (data.fatal) {
+          console.error('[HLS] Fatal error:', data.type, data.details);
+          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+            hls.startLoad(); // retry
+          } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+            hls.recoverMediaError();
+          }
+        }
+      });
+    } else if (isHLS && video.canPlayType('application/vnd.apple.mpegurl')) {
+      // Native HLS support (Safari)
+      video.src = videoUrl;
+      video.load();
+    } else {
+      // Standard video source
+      video.src = videoUrl;
+      video.load();
+    }
+
     setCurrentTime(0);
     setBuffered(0);
     setPlaying(false);
+
+    return () => {
+      if (hlsRef.current) {
+        hlsRef.current.destroy();
+        hlsRef.current = null;
+      }
+    };
   }, [videoUrl]);
 
   // ── Load preview video for thumbnails ──
@@ -585,6 +643,15 @@ const VideoPlayer = forwardRef(function VideoPlayer({
           </div>
         )}
 
+        {/* Guest request cards — rendered inside video-panel so they're visible in fullscreen */}
+        {isHost && isFullscreen && guestRequests.length > 0 && (
+          <GuestRequestModal
+            requests={guestRequests}
+            onApprove={onApproveRequest}
+            onReject={onRejectRequest}
+          />
+        )}
+
         {/* No video placeholder */}
         {!videoUrl && (
           <div className="no-video-placeholder">
@@ -713,6 +780,35 @@ const VideoPlayer = forwardRef(function VideoPlayer({
           <span className="time-display">
             {formatTime(currentTime)} / {formatTime(duration)}
           </span>
+
+          {/* Playback Speed */}
+          <div className="speed-control" style={{ position: 'relative' }}>
+            <button
+              className="ctrl-btn speed-btn"
+              onClick={() => setSpeedMenuOpen(!speedMenuOpen)}
+              title="Playback speed"
+            >
+              {playbackRate}x
+            </button>
+            {speedMenuOpen && (
+              <div className="speed-menu">
+                {SPEED_OPTIONS.map(s => (
+                  <button
+                    key={s}
+                    className={`speed-option ${playbackRate === s ? 'active' : ''}`}
+                    onClick={() => {
+                      setPlaybackRate(s);
+                      const video = videoRef.current;
+                      if (video) video.playbackRate = s;
+                      setSpeedMenuOpen(false);
+                    }}
+                  >
+                    {s}x
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
 
           <div className="ctrl-spacer" />
 
