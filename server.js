@@ -237,7 +237,7 @@ function getOrCreateRoom(roomId) {
         lastUpdated: Date.now(),
         hostBuffering: false,
       },
-      guestControls: false,
+      guestControls: true,
     };
   }
   return rooms[roomId];

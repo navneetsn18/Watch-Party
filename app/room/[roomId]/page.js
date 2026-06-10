@@ -16,7 +16,7 @@ function RoomContent({ roomId }) {
 
   const [isHost, setIsHost] = useState(false);
   const [userCount, setUserCount] = useState(1);
-  const [guestControls, setGuestControls] = useState(false);
+  const [guestControls, setGuestControls] = useState(true);
   const [videoUrl, setVideoUrl] = useState(null);
   const [currentVideoKey, setCurrentVideoKey] = useState(null);
   const [videos, setVideos] = useState([]);
@@ -56,6 +56,11 @@ function RoomContent({ roomId }) {
       return false;
     }
   }, []);  // stable — no deps
+
+  const isVideoReady = useCallback(() => {
+    const video = playerRef.current?.getVideo();
+    return video && video.readyState >= 1; // 1 = HAVE_METADATA
+  }, []);
 
   // ── Load video list (stable) ──
   const loadVideoList = useCallback(async () => {
@@ -110,6 +115,10 @@ function RoomContent({ roomId }) {
     });
 
     socket.on('play', ({ currentTime }) => {
+      if (!isVideoReady()) {
+        pendingSyncRef.current = { currentTime, playing: true, hostBuffering: false };
+        return;
+      }
       const player = playerRef.current;
       if (player) {
         player.seek(currentTime);
@@ -119,6 +128,10 @@ function RoomContent({ roomId }) {
     });
 
     socket.on('pause', ({ currentTime }) => {
+      if (!isVideoReady()) {
+        pendingSyncRef.current = { currentTime, playing: false, hostBuffering: false };
+        return;
+      }
       const player = playerRef.current;
       if (player) {
         player.seek(currentTime);
@@ -128,6 +141,10 @@ function RoomContent({ roomId }) {
     });
 
     socket.on('seek', ({ currentTime, playing }) => {
+      if (!isVideoReady()) {
+        pendingSyncRef.current = { currentTime, playing: !!playing, hostBuffering: false };
+        return;
+      }
       const player = playerRef.current;
       if (player) {
         player.seek(currentTime);
@@ -209,7 +226,7 @@ function RoomContent({ roomId }) {
       socket.removeAllListeners();
       disconnectSocket();
     };
-  }, [roomId, username, loadVideo, loadVideoList]);
+  }, [roomId, username, loadVideo, loadVideoList, isVideoReady]);
   // loadVideo and loadVideoList are now stable (no state deps)
 
   // ── Host periodic playback time broadcast ──
