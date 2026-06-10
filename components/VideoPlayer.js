@@ -99,18 +99,26 @@ const VideoPlayer = forwardRef(function VideoPlayer({
     if (!video) return;
 
     function handlePlay() {
-      setPlaying(true);
-      showPlayState(true);
       if (programmaticPlayCountRef.current > 0) {
+        setPlaying(true);
+        showPlayState(true);
         programmaticPlayCountRef.current -= 1;
         return;
       }
+      setPlaying(true);
+      showPlayState(true);
       if (canControlRef.current) {
         onPlayRef.current(video.currentTime);
       }
     }
 
     function handlePause() {
+      if (programmaticPauseCountRef.current > 0) {
+        setPlaying(false);
+        showPlayState(false);
+        programmaticPauseCountRef.current -= 1;
+        return;
+      }
       if (video.seeking) {
         return;
       }
@@ -119,10 +127,6 @@ const VideoPlayer = forwardRef(function VideoPlayer({
       }
       setPlaying(false);
       showPlayState(false);
-      if (programmaticPauseCountRef.current > 0) {
-        programmaticPauseCountRef.current -= 1;
-        return;
-      }
       if (canControlRef.current) {
         onPauseRef.current(video.currentTime);
       }
