@@ -119,6 +119,25 @@ app.get('/api/video-url', async (req, res) => {
 
   try {
     if (VIDEO_SOURCE === 's3') {
+      const baseName = path.parse(key).name;
+      const hlsManifestKey = `videos/hls/${baseName}/index.m3u8`;
+
+      // Check if HLS version exists in S3
+      let hasHLS = false;
+      try {
+        await s3Client.send(new HeadObjectCommand({
+          Bucket: S3_BUCKET,
+          Key: hlsManifestKey
+        }));
+        hasHLS = true;
+      } catch (err) {
+        // HLS manifest doesn't exist or other error, fallback to raw
+      }
+
+      if (hasHLS) {
+        return res.json({ url: `/api/hls-s3/${encodeURIComponent(baseName)}/index.m3u8`, source: 'hls' });
+      }
+
       const ext = path.extname(key).toLowerCase();
       const contentTypes = {
         '.mp4': 'video/mp4',
@@ -270,6 +289,77 @@ app.get('/api/hls/:videoname/:file', (req, res) => {
   fs.createReadStream(filePath).pipe(res);
 });
 
+// ─── HLS Segment Serving from S3 (Proxy) ────────────────────────────────────
+app.get('/api/hls-s3/:videoname/:file', async (req, res) => {
+  const { videoname, file } = req.params;
+  const safeName = decodeURIComponent(videoname).replace(/[^a-zA-Z0-9_\-. ]/g, '');
+  const safeFile = decodeURIComponent(file).replace(/[^a-zA-Z0-9_\-.]/g, '');
+  const s3Key = `videos/hls/${safeName}/${safeFile}`;
+
+  try {
+    const ext = path.extname(safeFile).toLowerCase();
+    const mimeTypes = {
+      '.m3u8': 'application/vnd.apple.mpegurl',
+      '.ts': 'video/mp2t',
+    };
+    const contentType = mimeTypes[ext] || 'application/octet-stream';
+
+    const command = new GetObjectCommand({
+      Bucket: S3_BUCKET,
+      Key: s3Key,
+    });
+
+    const s3Response = await s3Client.send(command);
+
+    res.writeHead(200, {
+      'Content-Type': contentType,
+      'Content-Length': s3Response.ContentLength,
+      'Cache-Control': ext === '.m3u8' ? 'no-cache' : 'public, max-age=31536000',
+      'Access-Control-Allow-Origin': '*',
+    });
+
+    if (s3Response.Body && typeof s3Response.Body.pipe === 'function') {
+      s3Response.Body.pipe(res);
+    } else if (s3Response.Body) {
+      const buffer = await s3Response.Body.transformToByteArray();
+      res.end(Buffer.from(buffer));
+    } else {
+      res.status(404).send('HLS segment not found');
+    }
+  } catch (err) {
+    console.error(`[HLS-S3 PROXY ERROR] Failed to fetch ${s3Key}:`, err.message);
+    res.status(404).send('HLS segment not found');
+  }
+});
+
+// Helper to upload a flat folder of files to S3
+async function uploadDirectoryToS3(localDirPath, s3DirKey) {
+  if (!fs.existsSync(localDirPath)) return;
+  const files = fs.readdirSync(localDirPath);
+  for (const file of files) {
+    const localFilePath = path.join(localDirPath, file);
+    const stat = fs.statSync(localFilePath);
+    if (stat.isFile()) {
+      const fileStream = fs.createReadStream(localFilePath);
+      const ext = path.extname(file).toLowerCase();
+      const mimeTypes = {
+        '.m3u8': 'application/vnd.apple.mpegurl',
+        '.ts': 'video/mp2t',
+      };
+      const contentType = mimeTypes[ext] || 'application/octet-stream';
+
+      const uploadCommand = new PutObjectCommand({
+        Bucket: S3_BUCKET,
+        Key: `${s3DirKey}/${file}`,
+        Body: fileStream,
+        ContentType: contentType,
+        ContentLength: stat.size,
+      });
+      await s3Client.send(uploadCommand);
+    }
+  }
+}
+
 // ─── Chunked Upload System ──────────────────────────────────────────────────
 const uploads = {}; // { uploadId: { filename, totalChunks, receivedChunks, tmpDir, status } }
 
@@ -377,60 +467,138 @@ app.post('/api/upload/complete', express.json(), async (req, res) => {
     fs.rmSync(upload.tmpDir, { recursive: true, force: true });
     console.log(`[UPLOAD] Assembled successfully: ${upload.filename}`);
 
-    if (VIDEO_SOURCE === 's3') {
-      upload.status = 's3_uploading';
-      console.log(`[UPLOAD] Starting upload to S3 for: ${upload.filename}`);
+    const baseName = path.parse(upload.filename).name;
+    const hlsDir = path.join(videosDir, 'hls', baseName);
 
-      // Perform S3 upload in the background
-      const uploadToS3 = async () => {
-        try {
-          const fileStream = fs.createReadStream(finalPath);
-          const ext = path.extname(upload.filename).toLowerCase();
-          const contentTypes = {
-            '.mp4': 'video/mp4',
-            '.webm': 'video/webm',
-            '.ogg': 'video/ogg',
-            '.mov': 'video/quicktime',
-            '.mkv': 'video/x-matroska',
-            '.avi': 'video/x-msvideo',
-          };
-          const contentType = contentTypes[ext] || 'video/mp4';
+    // Shared S3 uploader helper
+    const uploadToS3AndCleanup = async (hlsDirToUpload = null) => {
+      try {
+        console.log(`[UPLOAD] Uploading raw video to S3: ${upload.filename}`);
+        const fileStream = fs.createReadStream(finalPath);
+        const ext = path.extname(upload.filename).toLowerCase();
+        const contentTypes = {
+          '.mp4': 'video/mp4',
+          '.webm': 'video/webm',
+          '.ogg': 'video/ogg',
+          '.mov': 'video/quicktime',
+          '.mkv': 'video/x-matroska',
+          '.avi': 'video/x-msvideo',
+        };
+        const contentType = contentTypes[ext] || 'video/mp4';
 
-          const uploadCommand = new PutObjectCommand({
-            Bucket: S3_BUCKET,
-            Key: `videos/${upload.filename}`,
-            Body: fileStream,
-            ContentType: contentType,
-            ContentLength: upload.fileSize,
-          });
+        const uploadCommand = new PutObjectCommand({
+          Bucket: S3_BUCKET,
+          Key: `videos/${upload.filename}`,
+          Body: fileStream,
+          ContentType: contentType,
+          ContentLength: upload.fileSize,
+        });
+        await s3Client.send(uploadCommand);
 
-          await s3Client.send(uploadCommand);
-          upload.status = 'complete';
-          console.log(`[UPLOAD] S3 Upload complete: ${upload.filename}`);
-          io.emit('transcode-complete', { uploadId, filename: upload.filename });
-        } catch (err) {
-          upload.status = 'error';
-          console.error(`[UPLOAD] S3 Upload failed: ${err.message}`);
-          io.emit('transcode-error', { uploadId, filename: upload.filename });
-        } finally {
-          // Clean up local assembled file
-          try {
-            if (fs.existsSync(finalPath)) {
-              fs.unlinkSync(finalPath);
-              console.log(`[UPLOAD] Cleaned up local file: ${finalPath}`);
-            }
-          } catch (cleanupErr) {
-            console.error(`[UPLOAD] Failed to clean up local file: ${cleanupErr.message}`);
-          }
+        if (hlsDirToUpload && fs.existsSync(hlsDirToUpload)) {
+          console.log(`[UPLOAD] Uploading HLS chunks to S3 for baseName: ${baseName}`);
+          await uploadDirectoryToS3(hlsDirToUpload, `videos/hls/${baseName}`);
         }
-      };
 
-      uploadToS3(); // execute asynchronously
-      res.json({ status: 's3_uploading', uploadId, filename: upload.filename });
+        upload.status = 'complete';
+        console.log(`[UPLOAD] S3 Upload complete (including HLS chunks if transcoded): ${upload.filename}`);
+        io.emit('transcode-complete', { uploadId, filename: upload.filename });
+      } catch (err) {
+        upload.status = 'error';
+        console.error(`[UPLOAD] S3 Upload failed: ${err.message}`);
+        io.emit('transcode-error', { uploadId, filename: upload.filename });
+      } finally {
+        try {
+          if (fs.existsSync(finalPath)) {
+            fs.unlinkSync(finalPath);
+            console.log(`[UPLOAD] Cleaned up local raw file: ${finalPath}`);
+          }
+        } catch (cleanupErr) {
+          console.error(`[UPLOAD] Failed to clean up local raw file: ${cleanupErr.message}`);
+        }
+        try {
+          if (hlsDirToUpload && fs.existsSync(hlsDirToUpload)) {
+            fs.rmSync(hlsDirToUpload, { recursive: true, force: true });
+            console.log(`[UPLOAD] Cleaned up local HLS dir: ${hlsDirToUpload}`);
+          }
+        } catch (cleanupErr) {
+          console.error(`[UPLOAD] Failed to clean up local HLS dir: ${cleanupErr.message}`);
+        }
+      }
+    };
+
+    if (VIDEO_SOURCE === 's3') {
+      if (FFMPEG_PATH) {
+        upload.status = 'transcoding';
+        fs.mkdirSync(hlsDir, { recursive: true });
+
+        const hlsOutput = path.join(hlsDir, 'index.m3u8');
+        const ext = path.extname(upload.filename).toLowerCase();
+
+        // Use codec copy for MP4 (fast), re-encode for others
+        const ffmpegArgs = ext === '.mp4'
+          ? [
+              '-i', finalPath,
+              '-codec', 'copy',
+              '-start_number', '0',
+              '-hls_time', '4',
+              '-hls_list_size', '0',
+              '-hls_segment_filename', path.join(hlsDir, 'segment%03d.ts'),
+              '-f', 'hls',
+              hlsOutput,
+            ]
+          : [
+              '-i', finalPath,
+              '-c:v', 'libx264',
+              '-c:a', 'aac',
+              '-preset', 'fast',
+              '-crf', '23',
+              '-start_number', '0',
+              '-hls_time', '4',
+              '-hls_list_size', '0',
+              '-hls_segment_filename', path.join(hlsDir, 'segment%03d.ts'),
+              '-f', 'hls',
+              hlsOutput,
+            ];
+
+        console.log(`[HLS] Starting transcoding for S3 upload: ${upload.filename}`);
+
+        const ffmpeg = spawn(FFMPEG_PATH, ffmpegArgs);
+        let ffmpegStderr = '';
+
+        ffmpeg.stderr.on('data', (data) => {
+          ffmpegStderr += data.toString();
+          const timeMatch = data.toString().match(/time=(\d{2}):(\d{2}):(\d{2})/);
+          if (timeMatch) {
+            const secs = parseInt(timeMatch[1]) * 3600 + parseInt(timeMatch[2]) * 60 + parseInt(timeMatch[3]);
+            io.emit('transcode-progress', { uploadId, filename: upload.filename, seconds: secs });
+          }
+        });
+
+        ffmpeg.on('close', (code) => {
+          if (code === 0) {
+            console.log(`[HLS] Local transcoding complete, starting S3 upload: ${upload.filename}`);
+            upload.status = 's3_uploading';
+            uploadToS3AndCleanup(hlsDir);
+          } else {
+            upload.status = 'error';
+            console.error(`[HLS] Transcoding failed (code ${code}): ${upload.filename}`);
+            console.error(`[HLS] FFmpeg stderr: ${ffmpegStderr.slice(-500)}`);
+            io.emit('transcode-error', { uploadId, filename: upload.filename });
+            // Clean up raw and transcode attempts
+            try { if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath); } catch {}
+            try { if (fs.existsSync(hlsDir)) fs.rmSync(hlsDir, { recursive: true, force: true }); } catch {}
+          }
+        });
+
+        res.json({ status: 'transcoding', uploadId, filename: upload.filename });
+      } else {
+        upload.status = 's3_uploading';
+        uploadToS3AndCleanup(null);
+        res.json({ status: 's3_uploading', uploadId, filename: upload.filename });
+      }
     } else if (FFMPEG_PATH) {
       upload.status = 'transcoding';
-      const baseName = path.parse(upload.filename).name;
-      const hlsDir = path.join(videosDir, 'hls', baseName);
       fs.mkdirSync(hlsDir, { recursive: true });
 
       const hlsOutput = path.join(hlsDir, 'index.m3u8');
@@ -462,14 +630,13 @@ app.post('/api/upload/complete', express.json(), async (req, res) => {
             hlsOutput,
           ];
 
-      console.log(`[HLS] Starting transcoding: ${upload.filename}`);
+      console.log(`[HLS] Starting local transcoding: ${upload.filename}`);
 
       const ffmpeg = spawn(FFMPEG_PATH, ffmpegArgs);
       let ffmpegStderr = '';
 
       ffmpeg.stderr.on('data', (data) => {
         ffmpegStderr += data.toString();
-        // Parse progress from FFmpeg output
         const timeMatch = data.toString().match(/time=(\d{2}):(\d{2}):(\d{2})/);
         if (timeMatch) {
           const secs = parseInt(timeMatch[1]) * 3600 + parseInt(timeMatch[2]) * 60 + parseInt(timeMatch[3]);
@@ -485,7 +652,7 @@ app.post('/api/upload/complete', express.json(), async (req, res) => {
         } else {
           upload.status = 'error';
           console.error(`[HLS] Transcoding failed (code ${code}): ${upload.filename}`);
-          console.error(`[HLS] FFmpeg stderr (last 500 chars): ${ffmpegStderr.slice(-500)}`);
+          console.error(`[HLS] FFmpeg stderr: ${ffmpegStderr.slice(-500)}`);
           io.emit('transcode-error', { uploadId, filename: upload.filename });
         }
       });
