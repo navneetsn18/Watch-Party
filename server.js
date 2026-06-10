@@ -160,11 +160,39 @@ app.get('/api/stream/:filename', (req, res) => {
   const range = req.headers.range;
   if (range) {
     const parts = range.replace(/bytes=/, '').split('-');
-    const start = parseInt(parts[0], 10);
-    const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-    const chunkSize = end - start + 1;
+    let start = parseInt(parts[0], 10);
+    let end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
 
+    // Handle suffix range requests (e.g. bytes=-500)
+    if (isNaN(start)) {
+      start = fileSize - end;
+      end = fileSize - 1;
+    }
+
+    // Handle invalid/out-of-bounds ranges
+    if (isNaN(end)) {
+      end = fileSize - 1;
+    }
+
+    if (start >= fileSize || end >= fileSize || start < 0 || end < 0 || start > end) {
+      res.writeHead(416, {
+        'Content-Range': `bytes */${fileSize}`,
+        'Content-Type': contentType,
+      });
+      return res.end();
+    }
+
+    const chunkSize = end - start + 1;
     const file = fs.createReadStream(filePath, { start, end });
+
+    file.on('error', (err) => {
+      console.error(`[STREAM ERROR] Failed to stream file: ${err.message}`);
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'text/plain' });
+        res.end('Internal Server Error');
+      }
+    });
+
     res.writeHead(206, {
       'Content-Range': `bytes ${start}-${end}/${fileSize}`,
       'Accept-Ranges': 'bytes',
@@ -181,7 +209,15 @@ app.get('/api/stream/:filename', (req, res) => {
       'Accept-Ranges': 'bytes',
       'Cache-Control': 'public, max-age=3600',
     });
-    fs.createReadStream(filePath).pipe(res);
+    const file = fs.createReadStream(filePath);
+    file.on('error', (err) => {
+      console.error(`[STREAM ERROR] Failed to stream whole file: ${err.message}`);
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'text/plain' });
+        res.end('Internal Server Error');
+      }
+    });
+    file.pipe(res);
   }
 });
 
@@ -247,10 +283,12 @@ io.on('connection', (socket) => {
 
     if (!room.host || !room.users.has(room.host)) {
       room.host = socket.id;
+      room.state.hostBuffering = false;
       socket.emit('role', { role: 'host' });
       console.log(`[WS] ${currentUsername} is host of room ${roomId}`);
     } else if (room.host === socket.id) {
       // Reconnecting host
+      room.state.hostBuffering = false;
       socket.emit('role', { role: 'host' });
       console.log(`[WS] ${currentUsername} reconnected as host of room ${roomId}`);
     } else {
@@ -371,6 +409,7 @@ io.on('connection', (socket) => {
       const remaining = [...room.users.keys()];
       if (remaining.length > 0) {
         room.host = remaining[0];
+        room.state.hostBuffering = false;
         const newHostInfo = room.users.get(remaining[0]);
         io.to(remaining[0]).emit('role', { role: 'host' });
         io.to(currentRoom).emit('host-changed', {

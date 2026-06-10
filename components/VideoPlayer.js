@@ -169,6 +169,12 @@ const VideoPlayer = forwardRef(function VideoPlayer({
         onHostBufferingRef.current(false);
       }
     }
+    function handleError() {
+      setIsBuffering(false);
+      if (isHost) {
+        onHostBufferingRef.current(false);
+      }
+    }
 
     video.addEventListener('play', handlePlay);
     video.addEventListener('pause', handlePause);
@@ -179,6 +185,7 @@ const VideoPlayer = forwardRef(function VideoPlayer({
     video.addEventListener('waiting', handleWaiting);
     video.addEventListener('playing', handlePlaying);
     video.addEventListener('canplay', handleCanPlay);
+    video.addEventListener('error', handleError);
 
     return () => {
       video.removeEventListener('play', handlePlay);
@@ -190,6 +197,7 @@ const VideoPlayer = forwardRef(function VideoPlayer({
       video.removeEventListener('waiting', handleWaiting);
       video.removeEventListener('playing', handlePlaying);
       video.removeEventListener('canplay', handleCanPlay);
+      video.removeEventListener('error', handleError);
     };
   }, [isHost]); // only isSyncing ref identity (stable)
 
