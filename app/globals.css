@@ -1095,6 +1095,7 @@ body {
   padding: 8px 12px 4px;
   flex-wrap: wrap;
   overflow: visible;
+  position: relative;
 }
 
 .reaction-btn {
@@ -1122,7 +1123,6 @@ body {
 
 /* Emoji picker */
 .emoji-picker-wrap {
-  position: relative;
   flex-shrink: 0;
 }
 
@@ -1146,8 +1146,9 @@ body {
 
 .emoji-panel {
   position: absolute;
-  bottom: 42px;
-  right: 0;
+  bottom: 100%;
+  margin-bottom: 6px;
+  right: 12px;
   background: rgba(15, 15, 22, 0.96);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
