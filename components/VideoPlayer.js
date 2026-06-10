@@ -49,6 +49,9 @@ const VideoPlayer = forwardRef(function VideoPlayer({
   useEffect(() => { onSeekRef.current = onSeek; }, [onSeek]);
   useEffect(() => { onHostBufferingRef.current = onHostBuffering; }, [onHostBuffering]);
 
+  const playingRef = useRef(playing);
+  useEffect(() => { playingRef.current = playing; }, [playing]);
+
   const programmaticPlayCountRef = useRef(0);
   const programmaticPauseCountRef = useRef(0);
   const programmaticSeekCountRef = useRef(0);
@@ -90,6 +93,9 @@ const VideoPlayer = forwardRef(function VideoPlayer({
     if (!video) return;
 
     function handlePlay() {
+      if (video.seeking) {
+        return;
+      }
       setPlaying(true);
       showPlayState(true);
       if (programmaticPlayCountRef.current > 0) {
@@ -102,6 +108,9 @@ const VideoPlayer = forwardRef(function VideoPlayer({
     }
 
     function handlePause() {
+      if (video.seeking) {
+        return;
+      }
       if (hostBufferingRef.current) {
         return;
       }
@@ -120,6 +129,12 @@ const VideoPlayer = forwardRef(function VideoPlayer({
       setIsBuffering(false);
       if (isHost) {
         onHostBufferingRef.current(false);
+      }
+      if (playingRef.current) {
+        programmaticPlayCountRef.current += 1;
+        video.play().catch(() => {
+          programmaticPlayCountRef.current = Math.max(0, programmaticPlayCountRef.current - 1);
+        });
       }
       if (programmaticSeekCountRef.current > 0) {
         programmaticSeekCountRef.current -= 1;
