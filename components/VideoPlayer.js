@@ -583,6 +583,14 @@ const VideoPlayer = forwardRef(function VideoPlayer({
         className="video-wrapper"
         onDoubleClick={toggleFullscreen}
       >
+        <video
+          ref={videoRef}
+          className="video-element"
+          preload="metadata"
+          style={{ display: videoUrl ? 'block' : 'none' }}
+          onClick={canControl ? togglePlay : undefined}
+        />
+
         <EmojiReactions canvasRef={canvasRef} />
 
         {/* Buffering spinner */}
@@ -664,14 +672,6 @@ const VideoPlayer = forwardRef(function VideoPlayer({
             </div>
           </div>
         )}
-
-        <video
-          ref={videoRef}
-          className="video-element"
-          preload="metadata"
-          style={{ display: videoUrl ? 'block' : 'none' }}
-          onClick={canControl ? togglePlay : undefined}
-        />
       </div>
 
       {/* Controls bar */}

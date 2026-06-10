@@ -379,9 +379,9 @@ body {
 
 /* ── Top Bar ── */
 .topbar {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  justify-content: space-between;
   padding: 10px 20px;
   background: rgba(10, 10, 15, 0.92);
   backdrop-filter: blur(16px);
@@ -423,22 +423,22 @@ body {
 .room-code:hover { background: rgba(224, 64, 251, 0.2); }
 
 .topbar-video-name {
-  font-size: 12px;
-  color: var(--text-secondary);
-  max-width: 180px;
+  font-size: 17px;
+  font-weight: 800;
+  color: var(--text-primary);
+  text-align: center;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  padding: 3px 10px;
-  background: rgba(255, 255, 255, 0.05);
-  border-radius: var(--radius-xs);
-  border: 1px solid var(--border-subtle);
+  letter-spacing: -0.4px;
+  margin: 0;
 }
 
 .topbar-right {
   display: flex;
   align-items: center;
   gap: 8px;
+  justify-content: flex-end;
 }
 
 .badge {
@@ -934,7 +934,8 @@ body {
   display: none;
   flex-direction: column;
   flex: 1;
-  overflow: hidden;
+  min-height: 0;
+  overflow: visible;
 }
 
 .sidebar-pane.active { display: flex; }
@@ -1092,8 +1093,8 @@ body {
   align-items: center;
   gap: 4px;
   padding: 8px 12px 4px;
-  flex-wrap: nowrap;
-  overflow-x: auto;
+  flex-wrap: wrap;
+  overflow: visible;
 }
 
 .reaction-btn {
@@ -1120,7 +1121,10 @@ body {
 .reaction-btn:active { transform: scale(0.9); }
 
 /* Emoji picker */
-.emoji-picker-wrap { position: relative; }
+.emoji-picker-wrap {
+  position: relative;
+  flex-shrink: 0;
+}
 
 .emoji-toggle-btn {
   background: var(--bg-elevated);
@@ -1142,23 +1146,53 @@ body {
 
 .emoji-panel {
   position: absolute;
-  bottom: 38px;
+  bottom: 42px;
   right: 0;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-strong);
+  background: rgba(15, 15, 22, 0.96);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: var(--radius);
   padding: 12px;
   display: none;
   flex-direction: column;
   gap: 10px;
   z-index: 300;
-  width: 248px;
-  max-height: 320px;
+  width: 256px;
+  max-height: 330px;
   overflow-y: auto;
-  box-shadow: var(--shadow-xl);
+  box-shadow: var(--shadow-2xl), 0 0 30px rgba(0, 0, 0, 0.5);
 }
 
-.emoji-panel.open { display: flex; }
+.emoji-panel.open {
+  display: flex;
+  animation: emojiPanelIn 0.2s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+.emoji-panel::-webkit-scrollbar {
+  width: 6px;
+}
+.emoji-panel::-webkit-scrollbar-track {
+  background: transparent;
+}
+.emoji-panel::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+}
+.emoji-panel::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+@keyframes emojiPanelIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
 
 /* Emoji mode tabs */
 .emoji-mode-tabs {
@@ -1172,9 +1206,9 @@ body {
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: var(--radius-xs);
-  padding: 5px 8px;
+  padding: 6px 4px;
   font-size: 11px;
-  font-weight: 500;
+  font-weight: 600;
   font-family: inherit;
   color: var(--text-muted);
   cursor: pointer;
@@ -1194,33 +1228,34 @@ body {
 }
 
 .emoji-cat-label {
-  font-size: 10px;
+  font-size: 9px;
   color: var(--text-muted);
-  font-weight: 600;
+  font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  margin-bottom: 4px;
+  margin-top: 10px;
+  margin-bottom: 6px;
 }
 
 .emoji-grid {
   display: grid;
   grid-template-columns: repeat(7, 1fr);
-  gap: 2px;
+  gap: 3px;
 }
 
 .emoji-item {
   text-align: center;
   font-size: 20px;
-  padding: 4px 2px;
-  border-radius: 6px;
+  padding: 6px 2px;
+  border-radius: 8px;
   cursor: pointer;
-  transition: all 0.1s;
+  transition: all var(--transition-fast);
   line-height: 1.2;
 }
 
 .emoji-item:hover {
-  background: var(--bg-hover);
-  transform: scale(1.2);
+  background: rgba(255, 255, 255, 0.08);
+  transform: scale(1.25);
 }
 
 /* Chat input */
@@ -1638,6 +1673,14 @@ body {
   flex-direction: column;
   gap: 10px;
   max-width: 360px;
+}
+
+/* Absolute position inside video-wrapper for fullscreen layout */
+.video-wrapper .guest-request-stack {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  z-index: 600;
 }
 
 .guest-request-card {

@@ -21,12 +21,16 @@ export default function TopBar({
         >
           Room: {roomId || '------'}
         </span>
-        {videoName && (
-          <span className="topbar-video-name" title={videoName}>
-            ▶ {videoName}
-          </span>
-        )}
       </div>
+
+      {/* Center — video name */}
+      {videoName ? (
+        <h2 className="topbar-video-name" title={videoName}>
+          ▶ {videoName}
+        </h2>
+      ) : (
+        <div />
+      )}
 
       <div className="topbar-right">
         {/* Guest controls toggle — host only */}
