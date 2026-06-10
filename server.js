@@ -11,6 +11,9 @@ const dev = process.env.NODE_ENV !== 'production';
 const PORT = process.env.PORT || 3000;
 const VIDEO_SOURCE = (process.env.VIDEO_SOURCE || 'local').trim();
 
+console.log('[DEBUG] --- Server Starting ---');
+console.log(`[DEBUG] VIDEO_SOURCE resolved to: "${VIDEO_SOURCE}"`);
+
 // S3 support (optional)
 let s3Client, GetObjectCommand, getSignedUrl, S3_BUCKET;
 if (VIDEO_SOURCE === 's3') {
@@ -20,6 +23,7 @@ if (VIDEO_SOURCE === 's3') {
   GetObjectCommand = GOC;
   getSignedUrl = gsu;
   S3_BUCKET = process.env.S3_BUCKET_NAME?.trim();
+  console.log(`[DEBUG] Initializing S3 Client | Region: "${process.env.AWS_REGION?.trim()}" | Bucket: "${S3_BUCKET}"`);
 }
 
 // ─── Next.js Setup ───────────────────────────────────────────────────────────
@@ -50,7 +54,10 @@ app.get('/api/videos', async (req, res) => {
       const command = new ListObjectsV2Command({
         Bucket: S3_BUCKET,
       });
+      console.log(`[DEBUG] Fetching videos from S3 bucket: "${S3_BUCKET}"...`);
       const result = await s3Client.send(command);
+      console.log(`[DEBUG] S3 returned ${result.Contents?.length || 0} total objects.`);
+      
       const videos = (result.Contents || [])
         .filter(obj => /\.(mp4|webm|ogg|mov|mkv|avi)$/i.test(obj.Key))
         .map(obj => ({
@@ -59,6 +66,8 @@ app.get('/api/videos', async (req, res) => {
           size: obj.Size,
           lastModified: obj.LastModified,
         }));
+        
+      console.log(`[DEBUG] Filtered down to ${videos.length} valid video files:`, videos.map(v => v.name));
       return res.json(videos);
     }
 
@@ -81,8 +90,12 @@ app.get('/api/videos', async (req, res) => {
       });
     res.json(files);
   } catch (err) {
-    console.error('[API] Error listing videos:', err);
-    res.status(500).json({ error: 'Failed to list videos' });
+    console.error('\n[API] === FATAL ERROR LISTING VIDEOS ===');
+    console.error('[API] Error Name:', err.name);
+    console.error('[API] Error Message:', err.message);
+    console.error('[API] Full Stack Trace:\n', err);
+    console.error('========================================\n');
+    res.status(500).json({ error: 'Failed to list videos', details: err.message });
   }
 });
 
