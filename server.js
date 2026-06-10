@@ -1,9 +1,9 @@
-require('dotenv').config({ path: '.env.local' });
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env.local') });
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const next = require('next');
-const path = require('path');
 const fs = require('fs');
 
 // ─── Config ──────────────────────────────────────────────────────────────────
