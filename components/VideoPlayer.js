@@ -63,14 +63,20 @@ const VideoPlayer = forwardRef(function VideoPlayer({
   useImperativeHandle(ref, () => ({
     play: () => {
       if (videoRef.current) {
-        programmaticPlayCountRef.current += 1;
-        videoRef.current.play().catch(() => {});
+        if (videoRef.current.paused) {
+          programmaticPlayCountRef.current += 1;
+          videoRef.current.play().catch(() => {
+            programmaticPlayCountRef.current = Math.max(0, programmaticPlayCountRef.current - 1);
+          });
+        }
       }
     },
     pause: () => {
       if (videoRef.current) {
-        programmaticPauseCountRef.current += 1;
-        videoRef.current.pause();
+        if (!videoRef.current.paused) {
+          programmaticPauseCountRef.current += 1;
+          videoRef.current.pause();
+        }
       }
     },
     seek: (time) => {
@@ -127,7 +133,7 @@ const VideoPlayer = forwardRef(function VideoPlayer({
       if (isHost) {
         onHostBufferingRef.current(false);
       }
-      if (playingRef.current) {
+      if (playingRef.current && video.paused) {
         programmaticPlayCountRef.current += 1;
         video.play().catch(() => {
           programmaticPlayCountRef.current = Math.max(0, programmaticPlayCountRef.current - 1);
@@ -231,11 +237,14 @@ const VideoPlayer = forwardRef(function VideoPlayer({
     if (hostBuffering) {
       video.pause();
     } else {
-      if (playing) {
-        video.play().catch(() => {});
+      if (playingRef.current && video.paused) {
+        programmaticPlayCountRef.current += 1;
+        video.play().catch(() => {
+          programmaticPlayCountRef.current = Math.max(0, programmaticPlayCountRef.current - 1);
+        });
       }
     }
-  }, [hostBuffering, playing]);
+  }, [hostBuffering]);
 
   // ── Keyboard shortcuts ──
   useEffect(() => {
