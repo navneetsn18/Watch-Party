@@ -93,7 +93,22 @@ app.get('/api/video-url', async (req, res) => {
 
   try {
     if (VIDEO_SOURCE === 's3') {
-      const command = new GetObjectCommand({ Bucket: S3_BUCKET, Key: key });
+      const ext = path.extname(key).toLowerCase();
+      const contentTypes = {
+        '.mp4': 'video/mp4',
+        '.webm': 'video/webm',
+        '.ogg': 'video/ogg',
+        '.mov': 'video/quicktime',
+        '.mkv': 'video/x-matroska',
+        '.avi': 'video/x-msvideo',
+      };
+      const ResponseContentType = contentTypes[ext] || 'video/mp4';
+
+      const command = new GetObjectCommand({ 
+        Bucket: S3_BUCKET, 
+        Key: key,
+        ResponseContentType
+      });
       const url = await getSignedUrl(s3Client, command, { expiresIn: 7200 });
       return res.json({ url, source: 's3' });
     }
