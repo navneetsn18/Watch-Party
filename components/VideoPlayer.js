@@ -93,9 +93,6 @@ const VideoPlayer = forwardRef(function VideoPlayer({
     if (!video) return;
 
     function handlePlay() {
-      if (video.seeking) {
-        return;
-      }
       setPlaying(true);
       showPlayState(true);
       if (programmaticPlayCountRef.current > 0) {

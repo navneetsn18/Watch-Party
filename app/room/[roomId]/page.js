@@ -170,6 +170,24 @@ function RoomContent({ roomId }) {
       }
     });
 
+    socket.on('host-time-update', ({ currentTime, playing, timestamp }) => {
+      if (!isHostRef.current) {
+        const player = playerRef.current;
+        if (player) {
+          const video = player.getVideo();
+          if (video && !video.paused && playing) {
+            const elapsed = (Date.now() - timestamp) / 1000;
+            const expectedTime = currentTime + elapsed;
+            const drift = Math.abs(video.currentTime - expectedTime);
+            if (drift > 2.0) {
+              console.log(`[SYNC] Guest drift detected: ${drift.toFixed(2)}s. Syncing to expected host time.`);
+              player.seek(expectedTime);
+            }
+          }
+        }
+      }
+    });
+
     socket.on('host-changed', ({ newHostName }) => {
       showToastRef.current(`👑 ${newHostName} is now the host`);
     });
@@ -193,6 +211,30 @@ function RoomContent({ roomId }) {
     };
   }, [roomId, username, loadVideo, loadVideoList]);
   // loadVideo and loadVideoList are now stable (no state deps)
+
+  // ── Host periodic playback time broadcast ──
+  useEffect(() => {
+    if (!isHost || !connected) return;
+    const interval = setInterval(() => {
+      const player = playerRef.current;
+      if (player) {
+        const video = player.getVideo();
+        if (video && !video.paused) {
+          const socket = socketRef.current;
+          if (socket) {
+            socket.emit('host-time-update', {
+              roomId,
+              currentTime: video.currentTime,
+              playing: true,
+              timestamp: Date.now()
+            });
+          }
+        }
+      }
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [isHost, connected, roomId]);
 
   // ── Helpers ──
   function addSystemMessage(text) {

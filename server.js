@@ -345,14 +345,15 @@ io.on('connection', (socket) => {
   });
 
   // ── Seek ──────────────────────────────────────────────────────────────────
-  socket.on('seek', ({ roomId, currentTime }) => {
+  socket.on('seek', ({ roomId, currentTime, playing }) => {
     const room = rooms[roomId];
     if (!room) return;
     if (room.host !== socket.id && !room.guestControls) return;
 
     room.state.currentTime = currentTime;
+    room.state.playing = typeof playing === 'boolean' ? playing : room.state.playing;
     room.state.lastUpdated = Date.now();
-    socket.to(roomId).emit('seek', { currentTime });
+    socket.to(roomId).emit('seek', { currentTime, playing });
   });
 
   // ── Toggle guest controls (host only) ─────────────────────────────────────
@@ -371,6 +372,16 @@ io.on('connection', (socket) => {
     if (!room || room.host !== socket.id) return;
     room.state.hostBuffering = !!isBuffering;
     socket.to(roomId).emit('host-buffering', { isBuffering });
+  });
+
+  // ── Host time update (periodic synchronization) ──────────────────────────
+  socket.on('host-time-update', ({ roomId, currentTime, playing, timestamp }) => {
+    const room = rooms[roomId];
+    if (!room || room.host !== socket.id) return;
+    room.state.currentTime = currentTime;
+    room.state.playing = !!playing;
+    room.state.lastUpdated = timestamp || Date.now();
+    socket.to(roomId).emit('host-time-update', { currentTime, playing, timestamp });
   });
 
   // ── Request sync ──────────────────────────────────────────────────────────
