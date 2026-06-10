@@ -9,17 +9,17 @@ const fs = require('fs');
 // ─── Config ──────────────────────────────────────────────────────────────────
 const dev = process.env.NODE_ENV !== 'production';
 const PORT = process.env.PORT || 3000;
-const VIDEO_SOURCE = process.env.VIDEO_SOURCE || 'local';
+const VIDEO_SOURCE = (process.env.VIDEO_SOURCE || 'local').trim();
 
 // S3 support (optional)
 let s3Client, GetObjectCommand, getSignedUrl, S3_BUCKET;
 if (VIDEO_SOURCE === 's3') {
   const { S3Client, GetObjectCommand: GOC, ListObjectsV2Command } = require('@aws-sdk/client-s3');
   const { getSignedUrl: gsu } = require('@aws-sdk/s3-request-presigner');
-  s3Client = new S3Client({ region: process.env.AWS_REGION || 'us-east-1' });
+  s3Client = new S3Client({ region: (process.env.AWS_REGION || 'us-east-1').trim() });
   GetObjectCommand = GOC;
   getSignedUrl = gsu;
-  S3_BUCKET = process.env.S3_BUCKET_NAME;
+  S3_BUCKET = process.env.S3_BUCKET_NAME?.trim();
 }
 
 // ─── Next.js Setup ───────────────────────────────────────────────────────────
