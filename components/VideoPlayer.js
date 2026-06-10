@@ -95,14 +95,32 @@ const VideoPlayer = forwardRef(function VideoPlayer({
     return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
   }, []);
 
+  const attemptPlay = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    programmaticPlayCountRef.current += 1;
+    video.play().catch((err) => {
+      programmaticPlayCountRef.current = Math.max(0, programmaticPlayCountRef.current - 1);
+      console.warn('[VideoPlayer] Playback blocked by browser policy, retrying muted:', err);
+
+      // Fallback: Mute the video and try playing again
+      video.muted = true;
+      setMuted(true);
+
+      programmaticPlayCountRef.current += 1;
+      video.play().catch((err2) => {
+        programmaticPlayCountRef.current = Math.max(0, programmaticPlayCountRef.current - 1);
+        console.error('[VideoPlayer] Muted playback also failed:', err2);
+      });
+    });
+  }, []);
+
   useImperativeHandle(ref, () => ({
     play: () => {
       if (videoRef.current) {
         if (videoRef.current.paused) {
-          programmaticPlayCountRef.current += 1;
-          videoRef.current.play().catch(() => {
-            programmaticPlayCountRef.current = Math.max(0, programmaticPlayCountRef.current - 1);
-          });
+          attemptPlay();
         }
       }
     },
@@ -173,10 +191,7 @@ const VideoPlayer = forwardRef(function VideoPlayer({
         onHostBufferingRef.current(false);
       }
       if (playingRef.current && video.paused) {
-        programmaticPlayCountRef.current += 1;
-        video.play().catch(() => {
-          programmaticPlayCountRef.current = Math.max(0, programmaticPlayCountRef.current - 1);
-        });
+        attemptPlay();
       }
       if (programmaticSeekCountRef.current > 0) {
         programmaticSeekCountRef.current -= 1;
@@ -326,6 +341,7 @@ const VideoPlayer = forwardRef(function VideoPlayer({
     const previewVideo = document.createElement('video');
     previewVideo.preload = 'metadata';
     previewVideo.muted = true;
+    previewVideo.playsInline = true;
     previewVideo.src = videoUrl;
     previewVideo.crossOrigin = 'anonymous';
     previewVideoRef.current = previewVideo;
@@ -353,13 +369,10 @@ const VideoPlayer = forwardRef(function VideoPlayer({
       video.pause();
     } else {
       if (playingRef.current && video.paused) {
-        programmaticPlayCountRef.current += 1;
-        video.play().catch(() => {
-          programmaticPlayCountRef.current = Math.max(0, programmaticPlayCountRef.current - 1);
-        });
+        attemptPlay();
       }
     }
-  }, [hostBuffering]);
+  }, [hostBuffering, attemptPlay]);
 
   // ── Keyboard shortcuts ──
   useEffect(() => {
@@ -587,6 +600,7 @@ const VideoPlayer = forwardRef(function VideoPlayer({
           ref={videoRef}
           className="video-element"
           preload="metadata"
+          playsInline
           style={{ display: videoUrl ? 'block' : 'none' }}
           onClick={canControl ? togglePlay : undefined}
         />
