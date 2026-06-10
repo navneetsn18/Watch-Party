@@ -26,12 +26,14 @@ console.log('[DEBUG] --- Server Starting ---');
 console.log(`[DEBUG] VIDEO_SOURCE resolved to: "${VIDEO_SOURCE}"`);  
 
 // S3 support (optional)
-let s3Client, GetObjectCommand, getSignedUrl, S3_BUCKET;
+let s3Client, GetObjectCommand, PutObjectCommand, DeleteObjectCommand, getSignedUrl, S3_BUCKET;
 if (VIDEO_SOURCE === 's3') {
-  const { S3Client, GetObjectCommand: GOC, ListObjectsV2Command } = require('@aws-sdk/client-s3');
+  const { S3Client, GetObjectCommand: GOC, ListObjectsV2Command, PutObjectCommand: POC, DeleteObjectCommand: DOC } = require('@aws-sdk/client-s3');
   const { getSignedUrl: gsu } = require('@aws-sdk/s3-request-presigner');
   s3Client = new S3Client({ region: (process.env.AWS_REGION || 'us-east-1').trim() });
   GetObjectCommand = GOC;
+  PutObjectCommand = POC;
+  DeleteObjectCommand = DOC;
   getSignedUrl = gsu;
   S3_BUCKET = process.env.S3_BUCKET_NAME?.trim();
   console.log(`[DEBUG] Initializing S3 Client | Region: "${process.env.AWS_REGION?.trim()}" | Bucket: "${S3_BUCKET}"`);
@@ -375,8 +377,57 @@ app.post('/api/upload/complete', express.json(), async (req, res) => {
     fs.rmSync(upload.tmpDir, { recursive: true, force: true });
     console.log(`[UPLOAD] Assembled successfully: ${upload.filename}`);
 
-    // Start HLS transcoding if FFmpeg is available
-    if (FFMPEG_PATH) {
+    if (VIDEO_SOURCE === 's3') {
+      upload.status = 's3_uploading';
+      console.log(`[UPLOAD] Starting upload to S3 for: ${upload.filename}`);
+
+      // Perform S3 upload in the background
+      const uploadToS3 = async () => {
+        try {
+          const fileStream = fs.createReadStream(finalPath);
+          const ext = path.extname(upload.filename).toLowerCase();
+          const contentTypes = {
+            '.mp4': 'video/mp4',
+            '.webm': 'video/webm',
+            '.ogg': 'video/ogg',
+            '.mov': 'video/quicktime',
+            '.mkv': 'video/x-matroska',
+            '.avi': 'video/x-msvideo',
+          };
+          const contentType = contentTypes[ext] || 'video/mp4';
+
+          const uploadCommand = new PutObjectCommand({
+            Bucket: S3_BUCKET,
+            Key: `videos/${upload.filename}`,
+            Body: fileStream,
+            ContentType: contentType,
+            ContentLength: upload.fileSize,
+          });
+
+          await s3Client.send(uploadCommand);
+          upload.status = 'complete';
+          console.log(`[UPLOAD] S3 Upload complete: ${upload.filename}`);
+          io.emit('transcode-complete', { uploadId, filename: upload.filename });
+        } catch (err) {
+          upload.status = 'error';
+          console.error(`[UPLOAD] S3 Upload failed: ${err.message}`);
+          io.emit('transcode-error', { uploadId, filename: upload.filename });
+        } finally {
+          // Clean up local assembled file
+          try {
+            if (fs.existsSync(finalPath)) {
+              fs.unlinkSync(finalPath);
+              console.log(`[UPLOAD] Cleaned up local file: ${finalPath}`);
+            }
+          } catch (cleanupErr) {
+            console.error(`[UPLOAD] Failed to clean up local file: ${cleanupErr.message}`);
+          }
+        }
+      };
+
+      uploadToS3(); // execute asynchronously
+      res.json({ status: 's3_uploading', uploadId, filename: upload.filename });
+    } else if (FFMPEG_PATH) {
       upload.status = 'transcoding';
       const baseName = path.parse(upload.filename).name;
       const hlsDir = path.join(videosDir, 'hls', baseName);
@@ -459,14 +510,24 @@ app.get('/api/upload/status/:uploadId', (req, res) => {
 });
 
 // Delete a video
-app.delete('/api/videos/:filename', (req, res) => {
+app.delete('/api/videos/:filename', async (req, res) => {
   const filename = decodeURIComponent(req.params.filename);
   const safeName = filename.replace(/[^a-zA-Z0-9_\-.() ]/g, '');
-  const filePath = path.join(__dirname, 'videos', safeName);
-  const baseName = path.parse(safeName).name;
-  const hlsDir = path.join(__dirname, 'videos', 'hls', baseName);
 
   try {
+    if (VIDEO_SOURCE === 's3') {
+      const command = new DeleteObjectCommand({
+        Bucket: S3_BUCKET,
+        Key: `videos/${safeName}`,
+      });
+      await s3Client.send(command);
+      return res.json({ deleted: true });
+    }
+
+    const filePath = path.join(__dirname, 'videos', safeName);
+    const baseName = path.parse(safeName).name;
+    const hlsDir = path.join(__dirname, 'videos', 'hls', baseName);
+
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     if (fs.existsSync(hlsDir)) fs.rmSync(hlsDir, { recursive: true, force: true });
     res.json({ deleted: true });

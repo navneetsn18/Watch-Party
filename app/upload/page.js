@@ -67,10 +67,13 @@ export default function UploadPage() {
       try {
         const res = await fetch(`/api/upload/status/${uploadId}`);
         const data = await res.json();
-        if (data.status === 'complete') setUploadState('complete');
-        if (data.status === 'error') {
+        if (data.status === 's3_uploading') {
+          setUploadState('s3_uploading');
+        } else if (data.status === 'complete') {
+          setUploadState('complete');
+        } else if (data.status === 'error') {
           setUploadState('error');
-          setErrorMsg('Transcoding failed. Video is still available for streaming.');
+          setErrorMsg('Processing failed. Please check server logs.');
         }
       } catch {}
     }, 3000);
@@ -199,6 +202,8 @@ export default function UploadPage() {
 
       if (completeData.status === 'transcoding') {
         setUploadState('transcoding');
+      } else if (completeData.status === 's3_uploading') {
+        setUploadState('s3_uploading');
       } else {
         setUploadState('complete');
       }
@@ -229,7 +234,7 @@ export default function UploadPage() {
   }
 
   const isUploading = uploadState === 'uploading';
-  const isProcessing = uploadState === 'assembling' || uploadState === 'transcoding';
+  const isProcessing = uploadState === 'assembling' || uploadState === 'transcoding' || uploadState === 's3_uploading';
   const isComplete = uploadState === 'complete';
   const isError = uploadState === 'error';
 
@@ -383,12 +388,14 @@ export default function UploadPage() {
               </div>
               <div>
                 <div className="upload-progress-title">
-                  {uploadState === 'assembling' ? 'Assembling file...' : 'Converting to HLS...'}
+                  {uploadState === 'assembling' && 'Assembling file...'}
+                  {uploadState === 's3_uploading' && 'Uploading to Amazon S3...'}
+                  {uploadState === 'transcoding' && 'Converting to HLS...'}
                 </div>
                 <div className="upload-progress-subtitle">
-                  {uploadState === 'transcoding'
-                    ? 'FFmpeg is splitting into 4-second segments for streaming'
-                    : 'Combining chunks into final video file'}
+                  {uploadState === 'assembling' && 'Combining chunks into final video file'}
+                  {uploadState === 's3_uploading' && 'Transferring the assembled file to your S3 bucket'}
+                  {uploadState === 'transcoding' && 'FFmpeg is splitting into 4-second segments for streaming'}
                 </div>
               </div>
             </div>
