@@ -12,7 +12,8 @@ const VideoPlayer = forwardRef(function VideoPlayer({
   onPlay,
   onPause,
   onSeek,
-  isSyncing,
+  onLoadedMetadata,
+  onHostBuffering,
 }, ref) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -40,18 +41,43 @@ const VideoPlayer = forwardRef(function VideoPlayer({
   const onPlayRef = useRef(onPlay);
   const onPauseRef = useRef(onPause);
   const onSeekRef = useRef(onSeek);
+  const onHostBufferingRef = useRef(onHostBuffering);
 
   useEffect(() => { canControlRef.current = canControl; }, [canControl]);
   useEffect(() => { onPlayRef.current = onPlay; }, [onPlay]);
   useEffect(() => { onPauseRef.current = onPause; }, [onPause]);
   useEffect(() => { onSeekRef.current = onSeek; }, [onSeek]);
+  useEffect(() => { onHostBufferingRef.current = onHostBuffering; }, [onHostBuffering]);
 
-  // Expose methods to parent
+  const programmaticPlayCountRef = useRef(0);
+  const programmaticPauseCountRef = useRef(0);
+  const programmaticSeekCountRef = useRef(0);
+
+  const [hostBuffering, setHostBufferingState] = useState(false);
+  const hostBufferingRef = useRef(false);
+  useEffect(() => { hostBufferingRef.current = hostBuffering; }, [hostBuffering]);
+
   useImperativeHandle(ref, () => ({
-    play: () => videoRef.current?.play().catch(() => {}),
-    pause: () => videoRef.current?.pause(),
+    play: () => {
+      if (videoRef.current) {
+        programmaticPlayCountRef.current += 1;
+        videoRef.current.play().catch(() => {});
+      }
+    },
+    pause: () => {
+      if (videoRef.current) {
+        programmaticPauseCountRef.current += 1;
+        videoRef.current.pause();
+      }
+    },
     seek: (time) => {
-      if (videoRef.current) videoRef.current.currentTime = time;
+      if (videoRef.current) {
+        programmaticSeekCountRef.current += 1;
+        videoRef.current.currentTime = time;
+      }
+    },
+    setHostBuffering: (buffering) => {
+      setHostBufferingState(buffering);
     },
     getCurrentTime: () => videoRef.current?.currentTime || 0,
     getVideo: () => videoRef.current,
@@ -66,21 +92,40 @@ const VideoPlayer = forwardRef(function VideoPlayer({
     function handlePlay() {
       setPlaying(true);
       showPlayState(true);
-      if (!isSyncing.current && canControlRef.current) {
+      if (programmaticPlayCountRef.current > 0) {
+        programmaticPlayCountRef.current -= 1;
+        return;
+      }
+      if (canControlRef.current) {
         onPlayRef.current(video.currentTime);
       }
     }
 
     function handlePause() {
+      if (hostBufferingRef.current) {
+        return;
+      }
       setPlaying(false);
       showPlayState(false);
-      if (!isSyncing.current && canControlRef.current) {
+      if (programmaticPauseCountRef.current > 0) {
+        programmaticPauseCountRef.current -= 1;
+        return;
+      }
+      if (canControlRef.current) {
         onPauseRef.current(video.currentTime);
       }
     }
 
     function handleSeeked() {
-      if (!isSyncing.current && canControlRef.current) {
+      setIsBuffering(false);
+      if (isHost) {
+        onHostBufferingRef.current(false);
+      }
+      if (programmaticSeekCountRef.current > 0) {
+        programmaticSeekCountRef.current -= 1;
+        return;
+      }
+      if (canControlRef.current) {
         onSeekRef.current(video.currentTime);
       }
     }
@@ -93,6 +138,9 @@ const VideoPlayer = forwardRef(function VideoPlayer({
 
     function handleLoadedMetadata() {
       setDuration(video.duration);
+      if (onLoadedMetadata) {
+        onLoadedMetadata();
+      }
     }
 
     function handleProgress() {
@@ -103,9 +151,24 @@ const VideoPlayer = forwardRef(function VideoPlayer({
       }
     }
 
-    function handleWaiting() { setIsBuffering(true); }
-    function handlePlaying() { setIsBuffering(false); }
-    function handleCanPlay() { setIsBuffering(false); }
+    function handleWaiting() {
+      setIsBuffering(true);
+      if (isHost) {
+        onHostBufferingRef.current(true);
+      }
+    }
+    function handlePlaying() {
+      setIsBuffering(false);
+      if (isHost) {
+        onHostBufferingRef.current(false);
+      }
+    }
+    function handleCanPlay() {
+      setIsBuffering(false);
+      if (isHost) {
+        onHostBufferingRef.current(false);
+      }
+    }
 
     video.addEventListener('play', handlePlay);
     video.addEventListener('pause', handlePause);
@@ -128,7 +191,7 @@ const VideoPlayer = forwardRef(function VideoPlayer({
       video.removeEventListener('playing', handlePlaying);
       video.removeEventListener('canplay', handleCanPlay);
     };
-  }, [isSyncing]); // only isSyncing ref identity (stable)
+  }, [isHost]); // only isSyncing ref identity (stable)
 
   // ── Load video ──
   useEffect(() => {
@@ -140,6 +203,19 @@ const VideoPlayer = forwardRef(function VideoPlayer({
     setBuffered(0);
     setPlaying(false);
   }, [videoUrl]);
+
+  // Sync playback with host buffering state
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (hostBuffering) {
+      video.pause();
+    } else {
+      if (playing) {
+        video.play().catch(() => {});
+      }
+    }
+  }, [hostBuffering, playing]);
 
   // ── Keyboard shortcuts ──
   useEffect(() => {
@@ -302,7 +378,7 @@ const VideoPlayer = forwardRef(function VideoPlayer({
         <EmojiReactions canvasRef={canvasRef} />
 
         {/* Buffering spinner */}
-        {isBuffering && (
+        {(isBuffering || hostBuffering) && (
           <div className="buffering-overlay">
             <div className="spinner" />
           </div>

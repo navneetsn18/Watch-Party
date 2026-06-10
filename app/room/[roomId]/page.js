@@ -27,8 +27,11 @@ function RoomContent({ roomId }) {
 
   const socketRef = useRef(null);
   const playerRef = useRef(null);
-  const isSyncingRef = useRef(false);
+  const pendingSyncRef = useRef(null);
   const showToast = useToast();
+
+  const isHostRef = useRef(isHost);
+  useEffect(() => { isHostRef.current = isHost; }, [isHost]);
 
   // ── Stable refs for callbacks used inside socket effect ──
   // This prevents the socket effect from re-running when these change
@@ -40,15 +43,17 @@ function RoomContent({ roomId }) {
   // ── Load video by key (stable — no state deps) ──
   const loadVideo = useCallback(async (key) => {
     // Use ref to check current key so callback identity stays stable
-    if (key === currentVideoKeyRef.current) return;
+    if (key === currentVideoKeyRef.current) return false;
     currentVideoKeyRef.current = key;
     setCurrentVideoKey(key);
     try {
       const res = await fetch('/api/video-url?key=' + encodeURIComponent(key));
       const data = await res.json();
       setVideoUrl(data.url);
+      return true;
     } catch (err) {
       console.error('Error loading video:', err);
+      return false;
     }
   }, []);  // stable — no deps
 
@@ -105,47 +110,64 @@ function RoomContent({ roomId }) {
     });
 
     socket.on('play', ({ currentTime }) => {
-      isSyncingRef.current = true;
       const player = playerRef.current;
       if (player) {
         player.seek(currentTime);
         player.play();
       }
-      setTimeout(() => { isSyncingRef.current = false; }, 500);
       addSystemMessage('▶ Playback started');
     });
 
     socket.on('pause', ({ currentTime }) => {
-      isSyncingRef.current = true;
       const player = playerRef.current;
       if (player) {
         player.seek(currentTime);
         player.pause();
       }
-      setTimeout(() => { isSyncingRef.current = false; }, 500);
       addSystemMessage('⏸ Playback paused');
     });
 
-    socket.on('seek', ({ currentTime }) => {
-      isSyncingRef.current = true;
+    socket.on('seek', ({ currentTime, playing }) => {
       const player = playerRef.current;
-      if (player) player.seek(currentTime);
-      setTimeout(() => { isSyncingRef.current = false; }, 500);
+      if (player) {
+        player.seek(currentTime);
+        if (playing) {
+          player.play();
+        } else {
+          player.pause();
+        }
+      }
     });
 
-    socket.on('sync-state', async ({ videoKey, playing, currentTime }) => {
+    socket.on('sync-state', async ({ videoKey, playing, currentTime, hostBuffering }) => {
       if (!videoKey) return;
-      await loadVideo(videoKey);
-      isSyncingRef.current = true;
-      // Wait for video to be ready
-      setTimeout(() => {
+      const isNewVideo = await loadVideo(videoKey);
+      
+      const performSync = () => {
         const player = playerRef.current;
         if (player) {
           player.seek(currentTime);
-          if (playing) player.play();
+          if (playing) {
+            player.play();
+          } else {
+            player.pause();
+          }
+          player.setHostBuffering(!!hostBuffering);
         }
-        setTimeout(() => { isSyncingRef.current = false; }, 500);
-      }, 500);
+      };
+
+      if (isNewVideo) {
+        pendingSyncRef.current = { currentTime, playing, hostBuffering: !!hostBuffering };
+      } else {
+        performSync();
+      }
+    });
+
+    socket.on('host-buffering', ({ isBuffering }) => {
+      const player = playerRef.current;
+      if (player) {
+        player.setHostBuffering(!!isBuffering);
+      }
     });
 
     socket.on('host-changed', ({ newHostName }) => {
@@ -205,8 +227,37 @@ function RoomContent({ roomId }) {
 
   function handleSeek(currentTime) {
     const socket = socketRef.current;
-    if (socket) socket.emit('seek', { roomId, currentTime });
+    if (socket) {
+      const player = playerRef.current;
+      const video = player?.getVideo();
+      const playing = video ? !video.paused : false;
+      socket.emit('seek', { roomId, currentTime, playing });
+    }
   }
+
+  const handleLoadedMetadata = useCallback(() => {
+    if (pendingSyncRef.current) {
+      const { currentTime, playing, hostBuffering } = pendingSyncRef.current;
+      pendingSyncRef.current = null;
+      const player = playerRef.current;
+      if (player) {
+        player.seek(currentTime);
+        if (playing) {
+          player.play();
+        } else {
+          player.pause();
+        }
+        player.setHostBuffering(hostBuffering);
+      }
+    }
+  }, []);
+
+  const handleHostBuffering = useCallback((isBuffering) => {
+    const socket = socketRef.current;
+    if (socket && isHostRef.current) {
+      socket.emit('host-buffering', { roomId, isBuffering });
+    }
+  }, [roomId]);
 
   function handleSelectVideo(video) {
     const socket = socketRef.current;
@@ -254,7 +305,8 @@ function RoomContent({ roomId }) {
           onPlay={handlePlay}
           onPause={handlePause}
           onSeek={handleSeek}
-          isSyncing={isSyncingRef}
+          onLoadedMetadata={handleLoadedMetadata}
+          onHostBuffering={handleHostBuffering}
         />
 
         <div className="sidebar">

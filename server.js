@@ -199,6 +199,7 @@ function getOrCreateRoom(roomId) {
         playing: false,
         currentTime: 0,
         lastUpdated: Date.now(),
+        hostBuffering: false,
       },
       guestControls: false,
     };
@@ -276,7 +277,7 @@ io.on('connection', (socket) => {
   socket.on('select-video', ({ roomId, videoKey }) => {
     const room = rooms[roomId];
     if (!room || room.host !== socket.id) return;
-    room.state = { videoKey, playing: false, currentTime: 0, lastUpdated: Date.now() };
+    room.state = { videoKey, playing: false, currentTime: 0, lastUpdated: Date.now(), hostBuffering: false };
     io.to(roomId).emit('video-selected', { videoKey });
   });
 
@@ -324,6 +325,14 @@ io.on('connection', (socket) => {
     room.guestControls = !!enabled;
     io.to(roomId).emit('guest-controls-changed', { enabled: room.guestControls });
     console.log(`[WS] Guest controls ${room.guestControls ? 'enabled' : 'disabled'} in room ${roomId}`);
+  });
+
+  // ── Host buffering ────────────────────────────────────────────────────────
+  socket.on('host-buffering', ({ roomId, isBuffering }) => {
+    const room = rooms[roomId];
+    if (!room || room.host !== socket.id) return;
+    room.state.hostBuffering = !!isBuffering;
+    socket.to(roomId).emit('host-buffering', { isBuffering });
   });
 
   // ── Request sync ──────────────────────────────────────────────────────────
