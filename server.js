@@ -170,7 +170,7 @@ console.log(`[DEBUG] VIDEO_SOURCE resolved to: "${VIDEO_SOURCE}"`);
 
 // S3 support (optional)
 let s3Client, GetObjectCommand, PutObjectCommand, DeleteObjectCommand, HeadObjectCommand, getSignedUrl, S3_BUCKET, ListObjectsV2Command, DeleteObjectsCommand;
-if (VIDEO_SOURCE === 's3') {
+if (process.env.S3_BUCKET_NAME?.trim()) {
   const { S3Client, GetObjectCommand: GOC, ListObjectsV2Command: LOV2, PutObjectCommand: POC, DeleteObjectCommand: DOC, HeadObjectCommand: HOC, DeleteObjectsCommand: DOCS } = require('@aws-sdk/client-s3');
   const { getSignedUrl: gsu } = require('@aws-sdk/s3-request-presigner');
   s3Client = new S3Client({ region: (process.env.AWS_REGION || 'us-east-1').trim() });
@@ -181,7 +181,7 @@ if (VIDEO_SOURCE === 's3') {
   getSignedUrl = gsu;
   ListObjectsV2Command = LOV2;
   DeleteObjectsCommand = DOCS;
-  S3_BUCKET = process.env.S3_BUCKET_NAME?.trim();
+  S3_BUCKET = process.env.S3_BUCKET_NAME.trim();
   console.log(`[DEBUG] Initializing S3 Client | Region: "${process.env.AWS_REGION?.trim()}" | Bucket: "${S3_BUCKET}"`);
 }
 
@@ -616,7 +616,8 @@ app.get('/api/videos', requireAuth, async (req, res) => {
         country: uploader?.country || '',
         avatarUrl: uploader?.avatarUrl || '',
         isPrivate: v.isPrivate || false,
-        isVerified: uploader?.isVerified || false
+        isVerified: uploader?.isVerified || false,
+        thumbnailUrl: v.thumbnailUrl || ''
       };
     });
 
@@ -988,7 +989,7 @@ app.post('/api/profile/upload-avatar', express.json({ limit: '6mb' }), requireAu
     const ext = path.extname(filename) || '.jpg';
     const uniqueFilename = `${req.user.id}-${Date.now()}${ext}`;
 
-    if (VIDEO_SOURCE === 's3') {
+    if (s3Client && S3_BUCKET) {
       const s3Key = `avatars/${uniqueFilename}`;
       await s3Client.send(new PutObjectCommand({
         Bucket: S3_BUCKET,
@@ -1017,7 +1018,7 @@ app.post('/api/profile/upload-avatar', express.json({ limit: '6mb' }), requireAu
 app.get('/api/avatar/:filename', async (req, res) => {
   const filename = req.params.filename;
   try {
-    if (VIDEO_SOURCE === 's3') {
+    if (s3Client && S3_BUCKET) {
       const command = new GetObjectCommand({
         Bucket: S3_BUCKET,
         Key: `avatars/${filename}`
@@ -1036,6 +1037,32 @@ app.get('/api/avatar/:filename', async (req, res) => {
     }
   } catch (err) {
     res.status(404).send('Avatar not found');
+  }
+});
+
+// Serve video thumbnail (especially for S3 storage)
+app.get('/api/thumbnail/:filename', async (req, res) => {
+  const filename = req.params.filename;
+  try {
+    if (s3Client && S3_BUCKET) {
+      const command = new GetObjectCommand({
+        Bucket: S3_BUCKET,
+        Key: `thumbnails/${filename}`
+      });
+      const s3Res = await s3Client.send(command);
+      res.setHeader('Content-Type', s3Res.ContentType || 'image/jpeg');
+      res.setHeader('Cache-Control', 'public, max-age=31536000'); // Cache for 1 year
+      s3Res.Body.pipe(res);
+    } else {
+      const filePath = path.join(__dirname, 'public', 'uploads', 'thumbnails', filename);
+      if (fs.existsSync(filePath)) {
+        res.sendFile(filePath);
+      } else {
+        res.status(404).send('Not found');
+      }
+    }
+  } catch (err) {
+    res.status(404).send('Thumbnail not found');
   }
 });
 
@@ -1108,7 +1135,7 @@ app.post('/api/upload/chunk', requireAuth, (req, res) => {
 });
 
 // Complete upload — assemble chunks and start HLS transcoding
-app.post('/api/upload/complete', express.json(), requireAuth, async (req, res) => {
+app.post('/api/upload/complete', express.json({ limit: '10mb' }), requireAuth, async (req, res) => {
   const { uploadId } = req.body;
   if (!uploadId) return res.status(400).json({ error: 'Missing uploadId' });
 
@@ -1125,13 +1152,55 @@ app.post('/api/upload/complete', express.json(), requireAuth, async (req, res) =
   upload.status = 'assembling';
   console.log(`[UPLOAD] Assembling ${upload.totalChunks} chunks for: ${upload.filename}`);
 
+  // Process video thumbnail if provided
+  let finalThumbnailUrl = '';
+  const { thumbnailData, thumbnailFilename, thumbnailContentType, thumbnailUrl } = req.body;
+
+  if (thumbnailData && thumbnailFilename) {
+    try {
+      const base64Data = thumbnailData.replace(/^data:image\/\w+;base64,/, "");
+      const buffer = Buffer.from(base64Data, 'base64');
+      const thumbExt = path.extname(thumbnailFilename) || '.jpg';
+      const uniqueThumbName = `${req.user.id}-${Date.now()}${thumbExt}`;
+
+      if (s3Client && S3_BUCKET) {
+        const s3Key = `thumbnails/${uniqueThumbName}`;
+        await s3Client.send(new PutObjectCommand({
+          Bucket: S3_BUCKET,
+          Key: s3Key,
+          Body: buffer,
+          ContentType: thumbnailContentType || 'image/jpeg'
+        }));
+        finalThumbnailUrl = `/api/thumbnail/${uniqueThumbName}`;
+        console.log(`[UPLOAD] Thumbnail uploaded to S3: ${s3Key}`);
+      } else {
+        const thumbsDir = path.join(__dirname, 'public', 'uploads', 'thumbnails');
+        if (!fs.existsSync(thumbsDir)) {
+          fs.mkdirSync(thumbsDir, { recursive: true });
+        }
+        fs.writeFileSync(path.join(thumbsDir, uniqueThumbName), buffer);
+        finalThumbnailUrl = `/uploads/thumbnails/${uniqueThumbName}`;
+        console.log(`[UPLOAD] Thumbnail saved locally: ${uniqueThumbName}`);
+      }
+    } catch (thumbErr) {
+      console.error(`[UPLOAD] Failed to process thumbnail file:`, thumbErr.message);
+    }
+  } else if (thumbnailUrl) {
+    finalThumbnailUrl = thumbnailUrl;
+    console.log(`[UPLOAD] Using external thumbnail URL: ${finalThumbnailUrl}`);
+  }
+
   try {
     const videosDir = path.join(__dirname, 'videos');
     if (!fs.existsSync(videosDir)) fs.mkdirSync(videosDir, { recursive: true });
 
     // ── Collision Check & Uniqueness Renaming ──
-    const baseNameInput = path.parse(upload.filename).name;
     const ext = path.extname(upload.filename).toLowerCase();
+    const rawDisplayName = req.body.displayName || path.parse(upload.filename).name;
+    const cleanBaseName = rawDisplayName.toLowerCase().endsWith(ext)
+      ? path.parse(rawDisplayName).name
+      : rawDisplayName;
+    const baseNameInput = cleanBaseName.replace(/[^a-zA-Z0-9_\-.() ]/g, '_');
 
     const checkVideoExists = async (fname) => {
       try {
@@ -1145,7 +1214,7 @@ app.post('/api/upload/complete', express.json(), requireAuth, async (req, res) =
       }
     };
 
-    let finalFilename = upload.filename;
+    let finalFilename = `${baseNameInput}${ext}`;
     let counter = 1;
     while ((await checkVideoExists(finalFilename)) || fs.existsSync(path.join(videosDir, finalFilename))) {
       finalFilename = `${baseNameInput}-${counter}${ext}`;
@@ -1180,7 +1249,6 @@ app.post('/api/upload/complete', express.json(), requireAuth, async (req, res) =
     const saveVideoToDB = async () => {
       try {
         const uploader = await getUserById(req.user.id);
-        const rawDisplayName = req.body.displayName || baseNameInput;
         const finalDisplayName = rawDisplayName.toLowerCase().endsWith(ext) ? rawDisplayName : `${rawDisplayName}${ext}`;
 
         const newVideo = {
@@ -1191,7 +1259,8 @@ app.post('/api/upload/complete', express.json(), requireAuth, async (req, res) =
           uploaderName: req.user.username,
           uploaderCountry: uploader?.country || '',
           isPrivate: req.body.isPrivate || false,
-          createdAt: new Date().toISOString()
+          createdAt: new Date().toISOString(),
+          thumbnailUrl: finalThumbnailUrl || ''
         };
 
         await ddbDocClient.send(new PutCommand({
@@ -1588,6 +1657,35 @@ app.delete('/api/videos/:filename', requireAuth, async (req, res) => {
 
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     if (fs.existsSync(hlsDir)) fs.rmSync(hlsDir, { recursive: true, force: true });
+
+    // Clean up thumbnail if it exists
+    if (videoRecord.thumbnailUrl) {
+      if (videoRecord.thumbnailUrl.startsWith('/api/thumbnail/')) {
+        const thumbFilename = videoRecord.thumbnailUrl.substring('/api/thumbnail/'.length);
+        if (s3Client && S3_BUCKET) {
+          try {
+            await s3Client.send(new DeleteObjectCommand({
+              Bucket: S3_BUCKET,
+              Key: `thumbnails/${thumbFilename}`
+            }));
+            console.log(`[DELETE] Deleted thumbnail from S3: thumbnails/${thumbFilename}`);
+          } catch (err) {
+            console.error(`[DELETE] Failed to delete S3 thumbnail:`, err.message);
+          }
+        }
+      } else if (videoRecord.thumbnailUrl.startsWith('/uploads/thumbnails/')) {
+        const thumbFilename = videoRecord.thumbnailUrl.substring('/uploads/thumbnails/'.length);
+        const thumbPath = path.join(__dirname, 'public', 'uploads', 'thumbnails', thumbFilename);
+        try {
+          if (fs.existsSync(thumbPath)) {
+            fs.unlinkSync(thumbPath);
+            console.log(`[DELETE] Deleted local thumbnail: ${thumbFilename}`);
+          }
+        } catch (err) {
+          console.error(`[DELETE] Failed to delete local thumbnail:`, err.message);
+        }
+      }
+    }
 
     // 3. Delete DB record
     await ddbDocClient.send(new DeleteCommand({

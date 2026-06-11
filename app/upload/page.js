@@ -42,6 +42,13 @@ export default function UploadPage() {
   const [tsUploaded, setTsUploaded] = useState(0);
   const [tsTotal, setTsTotal] = useState(0);
 
+  // Thumbnail states
+  const [thumbnailType, setThumbnailType] = useState('upload'); // upload | url
+  const [thumbnailData, setThumbnailData] = useState(null);
+  const [thumbnailFilename, setThumbnailFilename] = useState('');
+  const [thumbnailContentType, setThumbnailContentType] = useState('');
+  const [thumbnailUrl, setThumbnailUrl] = useState('');
+
   const fileInputRef = useRef(null);
   const abortRef = useRef(false);
   const startTimeRef = useRef(0);
@@ -237,18 +244,28 @@ export default function UploadPage() {
 
       // 3. Complete upload
       setUploadState('assembling');
+      const payload = {
+        uploadId,
+        uploaderId: user?.id,
+        displayName: displayName.trim() || file.name,
+        isPrivate: false // Starts public, user can toggle to private later in settings
+      };
+
+      if (thumbnailType === 'upload' && thumbnailData) {
+        payload.thumbnailData = thumbnailData;
+        payload.thumbnailFilename = thumbnailFilename;
+        payload.thumbnailContentType = thumbnailContentType;
+      } else if (thumbnailType === 'url' && thumbnailUrl) {
+        payload.thumbnailUrl = thumbnailUrl;
+      }
+
       const completeRes = await fetch('/api/upload/complete', {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
         },
-        body: JSON.stringify({ 
-          uploadId,
-          uploaderId: user?.id,
-          displayName: displayName.trim() || file.name,
-          isPrivate: false // Starts public, user can toggle to private later in settings
-        }),
+        body: JSON.stringify(payload),
       });
       const completeData = await completeRes.json();
       if (!completeRes.ok) throw new Error(completeData.error || 'Failed to complete upload');
@@ -288,6 +305,11 @@ export default function UploadPage() {
     setTsCreated(0);
     setTsUploaded(0);
     setTsTotal(0);
+    setThumbnailType('upload');
+    setThumbnailData(null);
+    setThumbnailFilename('');
+    setThumbnailContentType('');
+    setThumbnailUrl('');
   }
 
   const isUploading = uploadState === 'uploading';
@@ -382,18 +404,107 @@ export default function UploadPage() {
             </div>
 
             {file && (
-              <div className="input-group" style={{ marginTop: '20px', marginBottom: '10px' }}>
-                <label className="input-label">Video Title</label>
-                <input
-                  type="text"
-                  className="input-field"
-                  placeholder="Enter a custom title for this video"
-                  value={displayName}
-                  onChange={(e) => setDisplayName(e.target.value)}
-                  maxLength={100}
-                  required
-                />
-              </div>
+              <>
+                <div className="input-group" style={{ marginTop: '20px', marginBottom: '10px' }}>
+                  <label className="input-label">Video Title</label>
+                  <input
+                    type="text"
+                    className="input-field"
+                    placeholder="Enter a custom title for this video"
+                    value={displayName}
+                    onChange={(e) => setDisplayName(e.target.value)}
+                    maxLength={100}
+                    required
+                  />
+                </div>
+
+                <div className="input-group" style={{ marginTop: '15px', marginBottom: '15px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  <label className="input-label" style={{ fontWeight: 'bold', fontSize: '14px' }}>Video Thumbnail</label>
+                  <div style={{ display: 'flex', gap: '15px', marginBottom: '8px' }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '14px' }}>
+                      <input
+                        type="radio"
+                        name="thumbnailType"
+                        value="upload"
+                        checked={thumbnailType === 'upload'}
+                        onChange={() => setThumbnailType('upload')}
+                      />
+                      Upload Image
+                    </label>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '14px' }}>
+                      <input
+                        type="radio"
+                        name="thumbnailType"
+                        value="url"
+                        checked={thumbnailType === 'url'}
+                        onChange={() => setThumbnailType('url')}
+                      />
+                      Image URL
+                    </label>
+                  </div>
+
+                  {thumbnailType === 'upload' ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={(e) => {
+                          const imgFile = e.target.files?.[0];
+                          if (imgFile) {
+                            const reader = new FileReader();
+                            reader.onloadend = () => {
+                              setThumbnailData(reader.result);
+                              setThumbnailFilename(imgFile.name);
+                              setThumbnailContentType(imgFile.type);
+                            };
+                            reader.readAsDataURL(imgFile);
+                          }
+                        }}
+                        style={{
+                          fontSize: '13px',
+                          padding: '6px',
+                          background: 'rgba(255,255,255,0.05)',
+                          border: '1px solid rgba(255,255,255,0.1)',
+                          borderRadius: '4px',
+                          color: '#fff',
+                          cursor: 'pointer'
+                        }}
+                      />
+                      {thumbnailData && (
+                        <div style={{ marginTop: '5px' }}>
+                          <span style={{ fontSize: '12px', color: 'var(--text-muted)', display: 'block', marginBottom: '4px' }}>Preview:</span>
+                          <img
+                            src={thumbnailData}
+                            alt="Thumbnail Preview"
+                            style={{ maxWidth: '160px', height: '90px', objectFit: 'cover', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.2)' }}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                      <input
+                        type="text"
+                        className="input-field"
+                        placeholder="https://example.com/thumbnail.jpg"
+                        value={thumbnailUrl}
+                        onChange={(e) => setThumbnailUrl(e.target.value)}
+                      />
+                      {thumbnailUrl && (
+                        <div style={{ marginTop: '5px' }}>
+                          <span style={{ fontSize: '12px', color: 'var(--text-muted)', display: 'block', marginBottom: '4px' }}>Preview:</span>
+                          <img
+                            src={thumbnailUrl}
+                            alt="Thumbnail URL Preview"
+                            onError={(e) => { e.target.style.display = 'none'; }}
+                            style={{ maxWidth: '160px', height: '90px', objectFit: 'cover', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.2)' }}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </>
             )}
 
             {errorMsg && (

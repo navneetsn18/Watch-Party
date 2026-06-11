@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '../../lib/supabase';
 import { getFlagEmoji } from '../../components/NavBar';
+import { VerifiedBadge } from '../../components/VerifiedBadge';
 
 export default function SearchPage() {
   const router = useRouter();
@@ -216,7 +217,7 @@ export default function SearchPage() {
                       <div className="social-user-details">
                         <span className="social-username">
                           {profile.username}
-                          {profile.isVerified && <span className="verified-badge" title="Verified Creator" style={{ color: '#3b82f6', marginLeft: '4px' }}>✔️</span>}
+                          {profile.isVerified && <VerifiedBadge size={14} />}
                           {profile.country && ` ${getFlagEmoji(profile.country)}`}
                         </span>
                         <span className="social-user-subtitle">

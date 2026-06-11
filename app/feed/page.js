@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '../../lib/supabase';
 import { getFlagEmoji } from '../../components/NavBar';
+import { VerifiedBadge } from '../../components/VerifiedBadge';
 
 export default function FeedPage() {
   const router = useRouter();
@@ -125,66 +126,93 @@ export default function FeedPage() {
           <div className="feed-grid">
             {videos.map((video, idx) => (
               <div key={video.key || idx} className="feed-item-card">
-                <div className="feed-item-preview">
+                <div className="feed-item-preview" style={{ position: 'relative', width: '100%', height: 'auto', aspectRatio: '16/9' }}>
                   <div className="feed-preview-overlay">
                     <button className="btn-play-pulse" onClick={() => startWatchParty(video.key)}>
                       ▶
                     </button>
                   </div>
-                  <span className="feed-preview-icon">🎬</span>
+                  {video.thumbnailUrl ? (
+                    <img 
+                      src={video.thumbnailUrl} 
+                      alt={video.name} 
+                      style={{ width: '100%', height: '100%', objectFit: 'cover' }} 
+                    />
+                  ) : (
+                    <span className="feed-preview-icon">🎬</span>
+                  )}
                 </div>
 
-                <div className="feed-item-details">
-                  <h3 className="feed-video-title">{video.name}</h3>
-                  
-                  <div className="feed-uploader-info">
+                <div className="feed-item-details" style={{ display: 'flex', gap: '12px', padding: '16px' }}>
+                  {/* Creator Avatar on left */}
+                  <div style={{ flexShrink: 0 }}>
                     {video.avatarUrl ? (
-                      <img src={video.avatarUrl} alt="Avatar" className="feed-avatar" />
+                      <img 
+                        src={video.avatarUrl} 
+                        alt="Avatar" 
+                        className="feed-avatar" 
+                        style={{ width: '36px', height: '36px', borderRadius: '50%', objectFit: 'cover', display: 'block' }} 
+                      />
                     ) : (
-                      <div className="feed-avatar-placeholder">
+                      <div 
+                        className="feed-avatar-placeholder" 
+                        style={{ width: '36px', height: '36px', borderRadius: '50%', background: 'rgba(255,255,255,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '14px', fontWeight: 'bold', color: '#fff' }}
+                      >
                         {video.uploaderName.charAt(0).toUpperCase()}
                       </div>
                     )}
-                    <div className="feed-uploader-text">
-                      <span className="feed-username">
-                        {video.uploaderName}
-                        {video.isVerified && <span className="verified-badge" title="Verified Creator" style={{ color: '#3b82f6', marginLeft: '4px' }}>✔️</span>}
-                        {video.country && ` ${getFlagEmoji(video.country)}`}
-                      </span>
-                      <span className="feed-privacy-tag">
-                        {video.isPrivate ? '🔒 Friends' : '🌐 Public'}
-                      </span>
-                    </div>
                   </div>
 
-                  <div style={{ display: 'flex', gap: '8px', width: '100%', marginTop: '10px' }}>
-                    <button
-                      className="btn btn-primary start-party-btn"
-                      onClick={() => startWatchParty(video.key)}
-                      style={{ flex: 1 }}
+                  {/* Title and creator/action details on right */}
+                  <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                    <h3 
+                      className="feed-video-title" 
+                      style={{ margin: 0, fontSize: '15px', fontWeight: '600', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} 
+                      title={video.name}
                     >
-                      ✨ Watch Together
-                    </button>
-                    {video.uploaderId === profile?.id && (
+                      {video.name}
+                    </h3>
+                    
+                    <div className="feed-uploader-text" style={{ display: 'flex', flexDirection: 'column', fontSize: '13px', color: 'var(--text-muted)' }}>
+                      <span className="feed-username" style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '4px', color: 'rgba(255,255,255,0.7)' }}>
+                        {video.uploaderName}
+                        {video.isVerified && <VerifiedBadge size={14} />}
+                        {video.country && ` ${getFlagEmoji(video.country)}`}
+                      </span>
+                      <span className="feed-privacy-tag" style={{ fontSize: '11px', marginTop: '2px', color: 'rgba(255,255,255,0.4)' }}>
+                        {video.isPrivate ? '🔒 Friends Only' : '🌐 Public'}
+                      </span>
+                    </div>
+
+                    <div style={{ display: 'flex', gap: '8px', width: '100%', marginTop: '12px' }}>
                       <button
-                        className="btn btn-danger"
-                        onClick={() => handleDeleteVideo(video.key)}
-                        style={{
-                          padding: '0 12px',
-                          background: '#ef4444',
-                          color: '#fff',
-                          border: 'none',
-                          borderRadius: '6px',
-                          cursor: 'pointer',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center'
-                        }}
-                        title="Delete Video"
+                        className="btn btn-primary start-party-btn"
+                        onClick={() => startWatchParty(video.key)}
+                        style={{ flex: 1, padding: '6px 12px', fontSize: '13px', borderRadius: '6px' }}
                       >
-                        🗑️
+                        ✨ Watch Together
                       </button>
-                    )}
+                      {video.uploaderId === profile?.id && (
+                        <button
+                          className="btn btn-danger"
+                          onClick={() => handleDeleteVideo(video.key)}
+                          style={{
+                            padding: '0 10px',
+                            background: '#ef4444',
+                            color: '#fff',
+                            border: 'none',
+                            borderRadius: '6px',
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center'
+                          }}
+                          title="Delete Video"
+                        >
+                          🗑️
+                        </button>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>

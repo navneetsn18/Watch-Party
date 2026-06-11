@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { VerifiedBadge } from './VerifiedBadge';
 
 const EMOJI_DATA = {
   smileys: ['😀','😂','🥲','😍','🤩','😎','🥳','😭','😱','🤔','😏','🤯','😴','🥺','😈','💀','👻','🤡','💩','🎭'],
@@ -96,16 +97,25 @@ export default function ChatPanel({
       <div className="chat-messages" ref={messagesRef}>
         {messages.map((msg, i) => {
           if (msg.isSystem) {
+            const cleanMessage = msg.message && typeof msg.message === 'string'
+              ? msg.message.replace(/ \[VERIFIED\]/g, '')
+              : msg.message;
             return (
               <div key={i} className="chat-msg system">
-                {msg.message}
+                {cleanMessage}
               </div>
             );
           }
+          const senderStr = typeof msg.sender === 'string' ? msg.sender : '';
+          const hasVerified = senderStr.includes(' [VERIFIED]');
+          const cleanSender = hasVerified ? senderStr.replace(' [VERIFIED]', '') : senderStr;
           const isSelf = msg.sender === username;
           return (
             <div key={i} className={`chat-msg ${isSelf ? 'self' : 'other'}`}>
-              <span className="chat-sender">{msg.sender}</span>
+              <span className="chat-sender" style={{ display: 'inline-flex', alignItems: 'center' }}>
+                {cleanSender}
+                {hasVerified && <VerifiedBadge size={14} />}
+              </span>
               {msg.message}
             </div>
           );

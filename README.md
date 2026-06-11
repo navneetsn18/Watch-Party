@@ -9,6 +9,10 @@ A Netflix-style synchronized watch party web application built with **Next.js**,
 * **Real-time Synchronized Playback**: Play, pause, and seek actions are instantly synchronized across all users in a room using Socket.io.
 * **Host & Guest Controls**: The first user to join a room becomes the host. The host can toggle guest controls to allow or restrict guests from controlling video playback.
 * **AWS S3 & Local Video Storage**: Easily switch between streaming videos from an AWS S3 bucket or a local `./videos` folder.
+* **YouTube-Style Feed Grid**: A beautiful, responsive card layout grid displaying custom thumbnails, uploader avatars, creator names, country flags, and verified badges.
+* **Decoupled S3 Asset Storage**: Automatically uploads and serves static assets (user profile avatars and custom video thumbnails) to S3 when configured, even if videos are stored/streamed locally.
+* **Twitter-Style Verified Badges**: Uses a sleek inline Twitter-style blue tick SVG badge for verified creators in NavBar tooltips, search results, profile cards, explore feed, and room selectors.
+* **Correct Chat Username Order**: Messages inside the room chat render usernames and badges dynamically in the correct order: `[Username] [Flag] [Verified SVG Badge]`.
 * **Multi-Format Streaming Support**: Presigned URLs automatically override headers for formats like Matroska (`.mkv`), `.mp4`, `.webm`, `.mov`, and `.avi` to maximize browser compatibility.
 * **Real-time Chat & Reactions**: Text chat with system notifications (e.g., joins/leaves) and emoji reactions.
 * **Responsive Mobile Design**: Tailored CSS structure ensuring full access to video, chat, and room controls on mobile and tablet screens.
@@ -53,9 +57,12 @@ npm install
 Create a `.env.local` file in the root directory:
 ```env
 PORT=3000
-VIDEO_SOURCE=local  # Or 's3'
+VIDEO_SOURCE=local  # Or 's3' (Video streaming storage source)
 AWS_REGION=ap-south-1
 S3_BUCKET_NAME=watchpartyapp-online-1234
+AWS_ACCESS_KEY_ID=your_access_key       # Required for local development S3 access
+AWS_SECRET_ACCESS_KEY=your_secret_key   # Required for local development S3 access
+
 ```
 
 ### 4. Start Development Server
@@ -72,8 +79,13 @@ This guide walks you through deploying the application on **AWS EC2** using **PM
 
 ### Part 1: Configure AWS S3
 
-#### 1. Upload Videos
-Create an S3 bucket (e.g., `watchpartyapp-online-1234`) and upload your video files inside a folder named `videos/` (e.g., `videos/my-video.mkv`).
+Create an S3 bucket (e.g., `watchpartyapp-online-1234`). The application automatically organizes files in the bucket using the following folder structure:
+- `videos/` - Holds raw video files (e.g., `videos/my-video.mp4`)
+- `videos/hls/` - Holds HLS segment directories (e.g., `videos/hls/my-video/`)
+- `avatars/` - Holds uploaded custom user profile avatars (e.g., `avatars/user-123.jpg`)
+- `thumbnails/` - Holds uploaded custom video thumbnails (e.g., `thumbnails/user-123.jpg`)
+
+*(Note: Custom user avatars and video thumbnails are automatically stored/served from these S3 folders if `S3_BUCKET_NAME` is configured, regardless of whether `VIDEO_SOURCE` is set to `local` or `s3` for video streaming).*
 
 #### 2. Set Up CORS Policy
 To allow your web application to request video streams from S3, you must configure CORS on the bucket:
@@ -111,12 +123,32 @@ To allow your web application to request video streams from S3, you must configu
 
 To securely query S3 without storing sensitive credential files on the EC2 server, assign an IAM Role:
 1. Open the **IAM Console** and create a role for **EC2**.
-2. Attach the **`AmazonS3ReadOnlyAccess`** policy (or a custom policy granting `s3:ListBucket` and `s3:GetObject` on your bucket).
+2. Attach a custom policy granting access to your bucket. Because the application handles user avatar uploads, custom video thumbnail uploads, and video/thumbnail deletions in addition to video streaming, the server requires read, write, and delete permissions:
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "s3:ListBucket",
+                "s3:GetObject",
+                "s3:PutObject",
+                "s3:DeleteObject"
+            ],
+            "Resource": [
+                "arn:aws:s3:::watchpartyapp-online-1234",
+                "arn:aws:s3:::watchpartyapp-online-1234/*"
+            ]
+        }
+    ]
+}
+```
 3. Open the **EC2 Console**, select your EC2 instance.
 4. Click **Actions** > **Security** > **Modify IAM Role**.
 5. Select the newly created role and save.
 
-*If you prefer not to use IAM Roles, you must add `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` to `.env.local` on the EC2 server.*
+*If you prefer not to use IAM Roles, you must add `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (with the same permissions listed above) to `.env.local` on the EC2 server.*
 
 ---
 

@@ -12,6 +12,7 @@ import ShareModal from '../../../components/ShareModal';
 import GuestRequestModal from '../../../components/GuestRequestModal';
 import { supabase } from '../../../lib/supabase';
 import { getFlagEmoji } from '../../../components/NavBar';
+import { VerifiedBadge } from '../../../components/VerifiedBadge';
 
 function RoomContent({ roomId }) {
   const searchParams = useSearchParams();
@@ -36,8 +37,9 @@ function RoomContent({ roomId }) {
               const currentProfile = await res.json();
               setProfile(currentProfile);
               const flag = currentProfile.country ? ` ${getFlagEmoji(currentProfile.country)}` : '';
-              const verified = currentProfile.is_verified || currentProfile.isVerified ? '✔️ ' : '';
-              setUsername(`${verified}${currentProfile.username}${flag}`);
+              const isVerified = currentProfile.is_verified || currentProfile.isVerified;
+              const suffix = isVerified ? ' [VERIFIED]' : '';
+              setUsername(`${currentProfile.username}${flag}${suffix}`);
             } else {
               setUsername(currentUser.username || 'Viewer');
             }
@@ -618,7 +620,7 @@ function RoomContent({ roomId }) {
                           </span>
                           <span className="video-item-uploader" style={{ fontSize: '11px', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                             By: {v.uploaderName}
-                            {v.isVerified && <span className="verified-badge" title="Verified Creator" style={{ color: '#3b82f6', marginLeft: '4px' }}>✔️</span>}
+                            {v.isVerified && <VerifiedBadge size={12} />}
                             {v.country && ` ${getFlagEmoji(v.country)}`}
                             {v.isPrivate ? ' 🔒' : ''}
                           </span>

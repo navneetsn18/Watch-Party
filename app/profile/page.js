@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '../../lib/supabase';
 import { getFlagEmoji } from '../../components/NavBar';
+import { VerifiedBadge } from '../../components/VerifiedBadge';
 
 const COUNTRIES = [
   { code: 'IN', name: 'India' },
@@ -315,7 +316,7 @@ export default function ProfilePage() {
           )}
           <div className="profile-titles">
             <h2>
-              {username} {profile?.is_verified && <span className="verified-badge" title="Verified Creator" style={{ color: '#3b82f6', marginLeft: '4px', fontSize: '1.2rem' }}>✔️</span>} {country && <span className="profile-flag-title">{getFlagEmoji(country)}</span>}
+              {username} {profile?.is_verified && <VerifiedBadge size={16} />} {country && <span className="profile-flag-title">{getFlagEmoji(country)}</span>}
             </h2>
             <p>{user?.email}</p>
             <div className="profile-badges">

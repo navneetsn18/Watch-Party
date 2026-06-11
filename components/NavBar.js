@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import { supabase } from '../lib/supabase';
+import { VerifiedBadge } from './VerifiedBadge';
 
 // Helper to convert ISO country code to flag emoji
 export function getFlagEmoji(countryCode) {
@@ -136,7 +137,7 @@ export default function NavBar() {
               <div className="nav-profile-tooltip">
                 <div className="tooltip-item">
                   <strong>Username:</strong> {profile?.username || 'N/A'}
-                  {profile?.is_verified && <span className="verified-badge" title="Verified Creator" style={{ color: '#3b82f6', marginLeft: '4px' }}>✔️</span>}
+                  {profile?.is_verified && <VerifiedBadge size={14} />}
                 </div>
                 <div className="tooltip-item"><strong>Email:</strong> {user.email}</div>
                 <div className="tooltip-item"><strong>DOB:</strong> {profile?.dob || 'Not set'}</div>
