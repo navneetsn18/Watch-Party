@@ -3582,5 +3582,55 @@ body {
   margin-right: 4px;
 }
 
+/* ── Fake and Native Viewport Fullscreen Overlays ── */
+.video-panel.is-fake-fullscreen {
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  z-index: 999999 !important;
+  background: #000 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+.video-panel:fullscreen .video-wrapper,
+.video-panel.is-fake-fullscreen .video-wrapper {
+  height: 100% !important;
+  width: 100% !important;
+  position: absolute !important;
+  top: 0 !important;
+  left: 0 !important;
+}
+
+.video-panel:fullscreen .video-element,
+.video-panel.is-fake-fullscreen .video-element {
+  max-height: 100vh !important;
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.video-panel:fullscreen .controls-bar,
+.video-panel.is-fake-fullscreen .controls-bar {
+  position: absolute !important;
+  bottom: 0 !important;
+  left: 0 !important;
+  width: 100% !important;
+  z-index: 500 !important;
+  background: linear-gradient(to top, rgba(0,0,0,0.9) 0%, rgba(0,0,0,0.4) 75%, transparent 100%) !important;
+  transition: opacity 0.3s ease !important;
+}
+
+/* Controls hiding state */
+.controls-bar.controls-hidden {
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+.is-fullscreen-controls-hidden {
+  cursor: none !important;
+}
+
 
 

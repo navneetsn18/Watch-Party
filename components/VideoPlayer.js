@@ -48,6 +48,9 @@ const VideoPlayer = forwardRef(function VideoPlayer({
   const [tooltipLeft, setTooltipLeft] = useState(0);
   const [tooltipVisible, setTooltipVisible] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isFakeFullscreen, setIsFakeFullscreen] = useState(false);
+  const [areControlsVisible, setAreControlsVisible] = useState(true);
+  const controlsTimeoutRef = useRef(null);
   const [requestSentFlash, setRequestSentFlash] = useState(null);
   const [playbackRate, setPlaybackRate] = useState(1);
   const [speedMenuOpen, setSpeedMenuOpen] = useState(false);
@@ -89,11 +92,55 @@ const VideoPlayer = forwardRef(function VideoPlayer({
   // ── Fullscreen detection ──
   useEffect(() => {
     function handleFullscreenChange() {
-      setIsFullscreen(!!document.fullscreenElement);
+      const nativeFs = !!(document.fullscreenElement || document.webkitFullscreenElement);
+      setIsFullscreen(nativeFs);
+      if (!nativeFs) {
+        setIsFakeFullscreen(false);
+      }
     }
     document.addEventListener('fullscreenchange', handleFullscreenChange);
-    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      document.removeEventListener('webkitfullscreenchange', handleFullscreenChange);
+    };
   }, []);
+
+  const resetControlsTimeout = useCallback(() => {
+    setAreControlsVisible(true);
+    if (controlsTimeoutRef.current) {
+      clearTimeout(controlsTimeoutRef.current);
+    }
+    if (isFullscreen || isFakeFullscreen) {
+      controlsTimeoutRef.current = setTimeout(() => {
+        setAreControlsVisible(false);
+      }, 3000);
+    }
+  }, [isFullscreen, isFakeFullscreen]);
+
+  useEffect(() => {
+    resetControlsTimeout();
+    return () => {
+      if (controlsTimeoutRef.current) {
+        clearTimeout(controlsTimeoutRef.current);
+      }
+    };
+  }, [isFullscreen, isFakeFullscreen, resetControlsTimeout]);
+
+  useEffect(() => {
+    function handleKeyDown(e) {
+      if (e.key === 'Escape' && isFakeFullscreen) {
+        const panel = document.querySelector('.video-panel');
+        if (panel) {
+          panel.classList.remove('is-fake-fullscreen');
+        }
+        setIsFakeFullscreen(false);
+        setIsFullscreen(false);
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isFakeFullscreen]);
 
   const attemptPlay = useCallback(() => {
     const video = videoRef.current;
@@ -512,10 +559,43 @@ const VideoPlayer = forwardRef(function VideoPlayer({
   function toggleFullscreen() {
     const panel = document.querySelector('.video-panel');
     if (!panel) return;
-    if (!document.fullscreenElement) {
-      panel.requestFullscreen().catch(() => {});
+
+    const toggleFake = () => {
+      const active = !isFakeFullscreen;
+      setIsFakeFullscreen(active);
+      setIsFullscreen(active);
+      if (active) {
+        panel.classList.add('is-fake-fullscreen');
+      } else {
+        panel.classList.remove('is-fake-fullscreen');
+      }
+    };
+
+    if (isFakeFullscreen) {
+      toggleFake();
+      return;
+    }
+
+    if (panel.requestFullscreen) {
+      if (!document.fullscreenElement) {
+        panel.requestFullscreen().catch((err) => {
+          console.warn('[Fullscreen] requestFullscreen rejected, falling back to CSS:', err);
+          toggleFake();
+        });
+      } else {
+        document.exitFullscreen();
+      }
+    } else if (panel.webkitRequestFullscreen) {
+      if (!document.webkitFullscreenElement) {
+        panel.webkitRequestFullscreen().catch((err) => {
+          console.warn('[Fullscreen] webkitRequestFullscreen rejected, falling back to CSS:', err);
+          toggleFake();
+        });
+      } else {
+        document.webkitExitFullscreen();
+      }
     } else {
-      document.exitFullscreen();
+      toggleFake();
     }
   }
 
@@ -596,7 +676,12 @@ const VideoPlayer = forwardRef(function VideoPlayer({
   const progressPct = duration ? (currentTime / duration) * 100 : 0;
 
   return (
-    <div className="video-panel">
+    <div
+      className={`video-panel ${isFakeFullscreen ? 'is-fake-fullscreen' : ''} ${(isFullscreen && !areControlsVisible) ? 'is-fullscreen-controls-hidden' : ''}`}
+      onMouseMove={resetControlsTimeout}
+      onClick={resetControlsTimeout}
+      onTouchStart={resetControlsTimeout}
+    >
       <div
         className="video-wrapper"
         onDoubleClick={toggleFullscreen}
@@ -607,7 +692,14 @@ const VideoPlayer = forwardRef(function VideoPlayer({
           preload="metadata"
           playsInline
           style={{ display: videoUrl ? 'block' : 'none' }}
-          onClick={canControl ? togglePlay : undefined}
+          onClick={(e) => {
+            if ((isFullscreen || isFakeFullscreen) && !areControlsVisible) {
+              e.stopPropagation();
+              resetControlsTimeout();
+              return;
+            }
+            if (canControl) togglePlay();
+          }}
         />
 
         <EmojiReactions canvasRef={canvasRef} />
@@ -694,7 +786,7 @@ const VideoPlayer = forwardRef(function VideoPlayer({
       </div>
 
       {/* Controls bar */}
-      <div className="controls-bar">
+      <div className={`controls-bar ${areControlsVisible ? '' : 'controls-hidden'}`}>
         {/* Scrubber */}
         <div
           className="scrubber-wrap"
