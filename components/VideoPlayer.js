@@ -289,8 +289,8 @@ const VideoPlayer = forwardRef(function VideoPlayer({
     if (isHLS && Hls.isSupported()) {
       // Use hls.js for HLS streams
       const hls = new Hls({
-        maxBufferLength: 30,
-        maxMaxBufferLength: 60,
+        maxBufferLength: 90,
+        maxMaxBufferLength: 120,
         startLevel: -1, // auto quality
         enableWorker: true,
       });
