@@ -41,7 +41,8 @@ A Netflix-style synchronized watch party web application built with **Next.js**,
 ## 💻 Local Setup & Development
 
 ### 1. Prerequisites
-Ensure you have **Node.js (v18+)** installed.
+* **Node.js (v18+)**
+* **FFmpeg**: Required to convert uploaded videos into Netflix-style HLS (HTTP Live Streaming) format for lag-free synchronized playback.
 
 ### 2. Install Dependencies
 ```bash
@@ -54,7 +55,7 @@ Create a `.env.local` file in the root directory:
 PORT=3000
 VIDEO_SOURCE=local  # Or 's3'
 AWS_REGION=ap-south-1
-S3_BUCKET_NAME=your-s3-bucket-name
+S3_BUCKET_NAME=watchpartyapp-online-1234
 ```
 
 ### 4. Start Development Server
@@ -168,6 +169,92 @@ Once completed, save the current PM2 state:
 ```bash
 pm2 save
 ```
+
+---
+
+## 🎥 HLS Transcoding & FFmpeg Setup
+
+The application automatically converts uploaded videos into Netflix-style HLS (HTTP Live Streaming) format (4-second segments) to ensure lag-free streaming, especially on mobile browsers.
+
+For HLS transcoding to function, **FFmpeg must be installed on your server/EC2 instance**. If FFmpeg is not detected, HLS transcoding is disabled and the server falls back to raw video streaming.
+
+### 1. Installing FFmpeg on EC2 (Step-by-Step Compilation Guide)
+
+Follow this guide to compile and install FFmpeg from source on your EC2 instance:
+
+#### Step 1: Install required dependencies
+```bash
+sudo yum install -y yasm nasm \
+autoconf automake bzip2 bzip2-devel cmake freetype-devel \
+gcc gcc-c++ git libtool make pkgconfig zlib-devel
+```
+
+#### Step 2: Create a directory for FFmpeg source files
+```bash
+mkdir ~/ffmpeg_sources
+cd ~/ffmpeg_sources
+```
+
+#### Step 3: Download and extract FFmpeg source
+```bash
+curl -O -L https://ffmpeg.org/releases/ffmpeg-snapshot.tar.bz2
+tar xjvf ffmpeg-snapshot.tar.bz2
+cd ffmpeg
+```
+
+#### Step 4: Configure FFmpeg build
+```bash
+./configure \
+--prefix="/opt/ffmpeg" \
+--bindir="/opt/ffmpeg/bin" \
+--extra-cflags="-I/opt/ffmpeg/include -fstack-protector-strong -fpie -pie -Wl,-z,relro,-z,now -D_FORTIFY_SOURCE=2" \
+--extra-ldflags="-L/opt/ffmpeg/lib" \
+--extra-libs=-lpthread \
+--extra-libs=-lm \
+--enable-libfreetype \
+--disable-static \
+--enable-shared \
+--enable-rpath
+```
+
+#### Step 5: Compile and install FFmpeg
+```bash
+make -j$(nproc)
+sudo make install
+sudo ldconfig
+```
+
+#### Step 6: Update system-wide PATH variables
+To make FFmpeg executable globally and accessible by PM2 or other system runners, add this configuration system-wide:
+```bash
+sudo mkdir -p /etc/systemd/system.conf.d
+sudo sh -c 'cat > /etc/systemd/system.conf.d/ffmpeg.conf << EOL
+[Manager]
+DefaultEnvironment=PATH=/opt/ffmpeg/bin:$PATH
+DefaultEnvironment=LD_LIBRARY_PATH=/opt/ffmpeg/lib:$LD_LIBRARY_PATH
+EOL'
+```
+
+#### Step 7: Apply the configurations
+Reload systemd configuration and reboot the system:
+```bash
+sudo systemctl daemon-reexec
+sudo reboot
+```
+
+### 2. Verifying FFmpeg Setup
+You can run the built-in diagnostic test script on the local machine or your EC2 instance:
+```bash
+node scratch/test-ffmpeg.js
+```
+
+### 3. 📦 Local Storage Cleanup (S3 Mode)
+When running in S3 mode (`VIDEO_SOURCE=s3`):
+* Chunks are uploaded to the local `videos/tmp/<uploadId>` directory.
+* Once the final chunk is received, the server assembles them into `videos/<filename>`.
+* The server then runs FFmpeg to segment the assembled video, generating HLS files inside `videos/hls/<basename>`.
+* The raw video and HLS chunks are uploaded to your S3 bucket.
+* **Auto-Cleanup**: After a successful or failed S3 upload, the local raw video and HLS segment directory are deleted from the EC2 instance to preserve disk space. This is why the local `videos/` folder remains empty.
 
 ---
 

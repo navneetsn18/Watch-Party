@@ -26,14 +26,15 @@ console.log('[DEBUG] --- Server Starting ---');
 console.log(`[DEBUG] VIDEO_SOURCE resolved to: "${VIDEO_SOURCE}"`);  
 
 // S3 support (optional)
-let s3Client, GetObjectCommand, PutObjectCommand, DeleteObjectCommand, getSignedUrl, S3_BUCKET;
+let s3Client, GetObjectCommand, PutObjectCommand, DeleteObjectCommand, HeadObjectCommand, getSignedUrl, S3_BUCKET;
 if (VIDEO_SOURCE === 's3') {
-  const { S3Client, GetObjectCommand: GOC, ListObjectsV2Command, PutObjectCommand: POC, DeleteObjectCommand: DOC } = require('@aws-sdk/client-s3');
+  const { S3Client, GetObjectCommand: GOC, ListObjectsV2Command, PutObjectCommand: POC, DeleteObjectCommand: DOC, HeadObjectCommand: HOC } = require('@aws-sdk/client-s3');
   const { getSignedUrl: gsu } = require('@aws-sdk/s3-request-presigner');
   s3Client = new S3Client({ region: (process.env.AWS_REGION || 'us-east-1').trim() });
   GetObjectCommand = GOC;
   PutObjectCommand = POC;
   DeleteObjectCommand = DOC;
+  HeadObjectCommand = HOC;
   getSignedUrl = gsu;
   S3_BUCKET = process.env.S3_BUCKET_NAME?.trim();
   console.log(`[DEBUG] Initializing S3 Client | Region: "${process.env.AWS_REGION?.trim()}" | Bucket: "${S3_BUCKET}"`);
@@ -131,6 +132,9 @@ app.get('/api/video-url', async (req, res) => {
         }));
         hasHLS = true;
       } catch (err) {
+        if (err.name !== 'NotFound') {
+          console.error(`[S3 HEAD] Error checking HLS manifest ${hlsManifestKey}:`, err);
+        }
         // HLS manifest doesn't exist or other error, fallback to raw
       }
 
@@ -491,7 +495,7 @@ app.post('/api/upload/complete', express.json(), async (req, res) => {
           Key: `videos/${upload.filename}`,
           Body: fileStream,
           ContentType: contentType,
-          ContentLength: upload.fileSize,
+          ContentLength: fs.statSync(finalPath).size,
         });
         await s3Client.send(uploadCommand);
 
@@ -505,7 +509,7 @@ app.post('/api/upload/complete', express.json(), async (req, res) => {
         io.emit('transcode-complete', { uploadId, filename: upload.filename });
       } catch (err) {
         upload.status = 'error';
-        console.error(`[UPLOAD] S3 Upload failed: ${err.message}`);
+        console.error(`[UPLOAD] S3 Upload failed:`, err);
         io.emit('transcode-error', { uploadId, filename: upload.filename });
       } finally {
         try {
@@ -565,6 +569,14 @@ app.post('/api/upload/complete', express.json(), async (req, res) => {
 
         const ffmpeg = spawn(FFMPEG_PATH, ffmpegArgs);
         let ffmpegStderr = '';
+
+        ffmpeg.on('error', (err) => {
+          console.error(`[HLS] FFmpeg spawn error for S3 upload:`, err);
+          upload.status = 'error';
+          io.emit('transcode-error', { uploadId, filename: upload.filename });
+          try { if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath); } catch {}
+          try { if (fs.existsSync(hlsDir)) fs.rmSync(hlsDir, { recursive: true, force: true }); } catch {}
+        });
 
         ffmpeg.stderr.on('data', (data) => {
           ffmpegStderr += data.toString();
@@ -634,6 +646,12 @@ app.post('/api/upload/complete', express.json(), async (req, res) => {
 
       const ffmpeg = spawn(FFMPEG_PATH, ffmpegArgs);
       let ffmpegStderr = '';
+
+      ffmpeg.on('error', (err) => {
+        console.error(`[HLS] FFmpeg spawn error for local transcoding:`, err);
+        upload.status = 'error';
+        io.emit('transcode-error', { uploadId, filename: upload.filename });
+      });
 
       ffmpeg.stderr.on('data', (data) => {
         ffmpegStderr += data.toString();
