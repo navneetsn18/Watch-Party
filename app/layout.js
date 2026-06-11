@@ -1,4 +1,5 @@
 import './globals.css';
+import NavBar from '../components/NavBar';
 
 export const metadata = {
   title: 'Watch Party — Watch Together',
@@ -15,7 +16,10 @@ export default function RootLayout({ children }) {
         <meta name="theme-color" content="#0a0a0f" />
         <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>" />
       </head>
-      <body suppressHydrationWarning>{children}</body>
+      <body suppressHydrationWarning>
+        <NavBar />
+        <main className="main-content-wrapper">{children}</main>
+      </body>
     </html>
   );
 }

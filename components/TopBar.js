@@ -1,5 +1,9 @@
 'use client';
 
+import { useState, useEffect } from 'react';
+import { useRouter } from 'next/navigation';
+import { supabase } from '../lib/supabase';
+
 export default function TopBar({
   roomId,
   userCount,
@@ -10,10 +14,28 @@ export default function TopBar({
   onShareClick,
   onCopyRoomId,
 }) {
+  const router = useRouter();
+  const [user, setUser] = useState(null);
+
+  useEffect(() => {
+    async function fetchUser() {
+      const { data: { user } } = await supabase.auth.getUser();
+      setUser(user);
+    }
+    fetchUser();
+  }, []);
+
+  async function handleSignOut() {
+    await supabase.auth.signOut();
+    router.push('/auth');
+  }
+
   return (
     <div className="topbar">
       <div className="topbar-left">
-        <div className="topbar-logo">🎬 Watch Party</div>
+        <div className="topbar-logo" onClick={() => router.push('/')} style={{ cursor: 'pointer' }}>
+          🎬 Watch Party
+        </div>
         <span
           className="room-code"
           onClick={onCopyRoomId}
@@ -21,6 +43,9 @@ export default function TopBar({
         >
           Room: {roomId || '------'}
         </span>
+        <button className="btn-icon" onClick={() => router.push('/')} title="Exit Room">
+          🚪 Exit
+        </button>
       </div>
 
       {/* Center — video name */}
@@ -57,7 +82,19 @@ export default function TopBar({
         <button className="btn-icon" onClick={onShareClick}>
           🔗 Share
         </button>
+
+        {user && (
+          <>
+            <button className="btn-icon" onClick={() => router.push('/profile')} title="Go to Profile">
+              👤 Profile
+            </button>
+            <button className="btn-icon" onClick={handleSignOut} title="Sign Out">
+              🚪 Out
+            </button>
+          </>
+        )}
       </div>
     </div>
   );
 }
+

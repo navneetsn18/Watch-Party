@@ -3,6 +3,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { getSocket } from '../../lib/socket';
+import { supabase } from '../../lib/supabase';
 
 const CHUNK_SIZE = 2 * 1024 * 1024; // 2MB chunks
 const ALLOWED_TYPES = ['video/mp4', 'video/webm', 'video/ogg', 'video/quicktime', 'video/x-matroska', 'video/avi', 'video/x-msvideo'];
@@ -24,6 +25,8 @@ function formatDuration(seconds) {
 
 export default function UploadPage() {
   const router = useRouter();
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
   const [file, setFile] = useState(null);
   const [dragOver, setDragOver] = useState(false);
   const [uploadState, setUploadState] = useState('idle'); // idle | uploading | assembling | transcoding | complete | error
@@ -34,10 +37,25 @@ export default function UploadPage() {
   const [errorMsg, setErrorMsg] = useState('');
   const [uploadId, setUploadId] = useState(null);
   const [transcodeTime, setTranscodeTime] = useState(0);
+  const [displayName, setDisplayName] = useState('');
 
   const fileInputRef = useRef(null);
   const abortRef = useRef(false);
   const startTimeRef = useRef(0);
+
+  // Authenticate user on load
+  useEffect(() => {
+    async function checkAuth() {
+      const { data: { user: currentUser } } = await supabase.auth.getUser();
+      if (!currentUser) {
+        router.push('/auth');
+        return;
+      }
+      setUser(currentUser);
+      setLoading(false);
+    }
+    checkAuth();
+  }, [router]);
 
   // Listen for transcode progress via Socket.IO
   useEffect(() => {
@@ -103,6 +121,7 @@ export default function UploadPage() {
     }
     setErrorMsg('');
     setFile(f);
+    setDisplayName(f.name.replace(/\.[^/.]+$/, ""));
     setUploadState('idle');
     setProgress(0);
     setSpeed(0);
@@ -140,10 +159,17 @@ export default function UploadPage() {
     const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
 
     try {
+      // Get current session token for authentication
+      const session = await supabase.auth.getSession();
+      const token = session.data.session?.access_token || '';
+
       // 1. Initialize upload
       const initRes = await fetch('/api/upload/init', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
         body: JSON.stringify({
           filename: file.name,
           totalChunks,
@@ -172,6 +198,7 @@ export default function UploadPage() {
             'Content-Type': 'application/octet-stream',
             'X-Upload-Id': uploadId,
             'X-Chunk-Index': String(i),
+            'Authorization': `Bearer ${token}`
           },
           body: chunk,
         });
@@ -197,8 +224,16 @@ export default function UploadPage() {
       setUploadState('assembling');
       const completeRes = await fetch('/api/upload/complete', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ uploadId }),
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ 
+          uploadId,
+          uploaderId: user?.id,
+          displayName: displayName.trim() || file.name,
+          isPrivate: false // Starts public, user can toggle to private later in settings
+        }),
       });
       const completeData = await completeRes.json();
       if (!completeRes.ok) throw new Error(completeData.error || 'Failed to complete upload');
@@ -226,6 +261,7 @@ export default function UploadPage() {
 
   function handleReset() {
     setFile(null);
+    setDisplayName('');
     setUploadState('idle');
     setProgress(0);
     setSpeed(0);
@@ -240,6 +276,20 @@ export default function UploadPage() {
   const isProcessing = uploadState === 'assembling' || uploadState === 'transcoding' || uploadState === 's3_uploading';
   const isComplete = uploadState === 'complete';
   const isError = uploadState === 'error';
+  if (loading) {
+    return (
+      <div className="upload-container">
+        <div className="upload-header" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '300px' }}>
+          <div className="upload-title" style={{ textAlign: 'center' }}>
+            <div className="upload-icon">📤</div>
+            <h1>Upload Video</h1>
+            <p>Verifying permissions...</p>
+            <div className="spinner" style={{ margin: '20px auto' }} />
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="upload-container">
@@ -312,6 +362,21 @@ export default function UploadPage() {
                 </>
               )}
             </div>
+
+            {file && (
+              <div className="input-group" style={{ marginTop: '20px', marginBottom: '10px' }}>
+                <label className="input-label">Video Title</label>
+                <input
+                  type="text"
+                  className="input-field"
+                  placeholder="Enter a custom title for this video"
+                  value={displayName}
+                  onChange={(e) => setDisplayName(e.target.value)}
+                  maxLength={100}
+                  required
+                />
+              </div>
+            )}
 
             {errorMsg && (
               <div className="upload-error">⚠️ {errorMsg}</div>

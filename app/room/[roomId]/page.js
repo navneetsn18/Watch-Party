@@ -10,10 +10,50 @@ import VideoPlayer from '../../../components/VideoPlayer';
 import ChatPanel from '../../../components/ChatPanel';
 import ShareModal from '../../../components/ShareModal';
 import GuestRequestModal from '../../../components/GuestRequestModal';
+import { supabase } from '../../../lib/supabase';
+import { getFlagEmoji } from '../../../components/NavBar';
 
 function RoomContent({ roomId }) {
   const searchParams = useSearchParams();
-  const username = searchParams.get('username') || 'Viewer';
+  const [username, setUsername] = useState('Viewer');
+  const [profile, setProfile] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const initialVideo = searchParams.get('video');
+
+  // Load user profile on room load
+  useEffect(() => {
+    async function loadUserProfile() {
+      const { data: { user: currentUser } } = await supabase.auth.getUser();
+      if (currentUser) {
+        const session = await supabase.auth.getSession();
+        const token = session.data.session?.access_token;
+        if (token) {
+          try {
+            const res = await fetch('/api/profile', {
+              headers: { 'Authorization': `Bearer ${token}` }
+            });
+            if (res.ok) {
+              const currentProfile = await res.json();
+              setProfile(currentProfile);
+              const flag = currentProfile.country ? ` ${getFlagEmoji(currentProfile.country)}` : '';
+              const verified = currentProfile.is_verified || currentProfile.isVerified ? '✔️ ' : '';
+              setUsername(`${verified}${currentProfile.username}${flag}`);
+            } else {
+              setUsername(currentUser.username || 'Viewer');
+            }
+          } catch (err) {
+            setUsername(currentUser.username || 'Viewer');
+          }
+        } else {
+          setUsername(currentUser.username || 'Viewer');
+        }
+      } else {
+        setUsername(searchParams.get('username') || 'Guest');
+      }
+      setAuthLoading(false);
+    }
+    loadUserProfile();
+  }, [searchParams]);
 
   const [isHost, setIsHost] = useState(false);
   const [userCount, setUserCount] = useState(1);
@@ -70,14 +110,20 @@ function RoomContent({ roomId }) {
   const pushFsNotificationRef = useRef(pushFsNotification);
   useEffect(() => { pushFsNotificationRef.current = pushFsNotification; }, [pushFsNotification]);
 
-  // ── Load video by key (stable — no state deps) ──
+  // ── Load video by key ──
   const loadVideo = useCallback(async (key) => {
-    // Use ref to check current key so callback identity stays stable
     if (key === currentVideoKeyRef.current) return false;
     currentVideoKeyRef.current = key;
     setCurrentVideoKey(key);
     try {
-      const res = await fetch('/api/video-url?key=' + encodeURIComponent(key));
+      const session = await supabase.auth.getSession();
+      const token = session.data.session?.access_token || '';
+      
+      const res = await fetch('/api/video-url?key=' + encodeURIComponent(key) + '&roomId=' + encodeURIComponent(roomId), {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
       const data = await res.json();
       setVideoUrl(data.url);
       return true;
@@ -85,38 +131,55 @@ function RoomContent({ roomId }) {
       console.error('Error loading video:', err);
       return false;
     }
-  }, []);  // stable — no deps
+  }, [roomId]);
 
   const isVideoReady = useCallback(() => {
     const video = playerRef.current?.getVideo();
     return video && video.readyState >= 1; // 1 = HAVE_METADATA
   }, []);
 
-  // ── Load video list (stable) ──
+  // ── Load video list ──
   const loadVideoList = useCallback(async () => {
     try {
-      const res = await fetch('/api/videos');
+      const session = await supabase.auth.getSession();
+      const token = session.data.session?.access_token || '';
+      
+      const res = await fetch('/api/videos', {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
       const data = await res.json();
-      setVideos(data);
+      setVideos(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error('Error loading video list:', err);
     }
   }, []);
 
-  // ── Socket connection (only depends on roomId + username) ──
+  // ── Socket connection (depends on roomId + username + profile) ──
   useEffect(() => {
+    if (authLoading) return; // Wait until auth check completes
+
     const socket = getSocket();
     socketRef.current = socket;
 
+    const joinData = {
+      roomId,
+      username,
+      userId: profile?.id || null,
+      avatarUrl: profile?.avatar_url || null,
+      country: profile?.country || null
+    };
+
     socket.on('connect', () => {
       setConnected(true);
-      socket.emit('join-room', { roomId, username });
+      socket.emit('join-room', joinData);
     });
 
     // If already connected (e.g. HMR), join immediately
     if (socket.connected) {
       setConnected(true);
-      socket.emit('join-room', { roomId, username });
+      socket.emit('join-room', joinData);
     }
 
     socket.on('role', ({ role }) => {
@@ -274,8 +337,18 @@ function RoomContent({ roomId }) {
       socket.removeAllListeners();
       disconnectSocket();
     };
-  }, [roomId, username, loadVideo, loadVideoList, isVideoReady]);
-  // loadVideo and loadVideoList are now stable (no state deps)
+  }, [roomId, username, profile, authLoading, loadVideo, loadVideoList, isVideoReady]);
+
+  // Auto select video if passed in query param (Host only)
+  useEffect(() => {
+    if (isHost && initialVideo && connected) {
+      const socket = socketRef.current;
+      if (socket) {
+        socket.emit('select-video', { roomId, videoKey: initialVideo });
+        loadVideo(initialVideo);
+      }
+    }
+  }, [isHost, initialVideo, connected, roomId, loadVideo]);
 
   // ── Host periodic playback time broadcast ──
   useEffect(() => {
@@ -511,8 +584,17 @@ function RoomContent({ roomId }) {
                       onClick={() => handleSelectVideo(v)}
                     >
                       <span className="video-item-icon">🎬</span>
-                      <span className="video-item-name" title={v.name}>{v.name}</span>
-                      <span className="video-item-size">{formatSize(v.size)}</span>
+                      <div className="video-item-details-box" style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0 }}>
+                        <span className="video-item-name" title={v.name} style={{ fontWeight: '500', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {v.name}
+                        </span>
+                        <span className="video-item-uploader" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                          By: {v.uploaderName}
+                          {v.isVerified && <span className="verified-badge" title="Verified Creator" style={{ color: '#3b82f6', marginLeft: '4px' }}>✔️</span>}
+                          {v.country && ` ${getFlagEmoji(v.country)}`}
+                          {v.isPrivate ? ' 🔒' : ''}
+                        </span>
+                      </div>
                     </div>
                   ))
                 )}

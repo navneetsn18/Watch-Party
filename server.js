@@ -8,6 +8,149 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { execSync, spawn } = require('child_process');
 
+const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
+const { DynamoDBDocumentClient, GetCommand, PutCommand, ScanCommand, QueryCommand, DeleteCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+
+const JWT_SECRET = process.env.JWT_SECRET || 'watch-party-secret-key-12345';
+
+const ddbRawClient = new DynamoDBClient({
+  region: process.env.AWS_REGION || 'ap-south-1',
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+  }
+});
+const ddbDocClient = DynamoDBDocumentClient.from(ddbRawClient);
+
+const requireAuth = async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.status(401).json({ error: 'Unauthorized: Missing token' });
+
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded; // { id, email, username }
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Unauthorized: Invalid or expired token' });
+  }
+};
+
+// ─── DynamoDB User Helper Functions ──────────────────────────────────────────
+async function getUserByEmail(email) {
+  try {
+    const res = await ddbDocClient.send(new GetCommand({
+      TableName: 'watch_party_users',
+      Key: { email: email.trim().toLowerCase() }
+    }));
+    return res.Item || null;
+  } catch (err) {
+    console.error('[DynamoDB] getUserByEmail error:', err);
+    return null;
+  }
+}
+
+async function getUserByUsername(username) {
+  try {
+    const cleanUsername = username.trim().toLowerCase().replace(/[^a-z0-9_]/g, '');
+    const res = await ddbDocClient.send(new QueryCommand({
+      TableName: 'watch_party_users',
+      IndexName: 'username-index',
+      KeyConditionExpression: 'username = :u',
+      ExpressionAttributeValues: {
+        ':u': cleanUsername
+      }
+    }));
+    return res.Items && res.Items.length > 0 ? res.Items[0] : null;
+  } catch (err) {
+    console.error('[DynamoDB] getUserByUsername error:', err);
+    return null;
+  }
+}
+
+async function getUserById(id) {
+  try {
+    const res = await ddbDocClient.send(new ScanCommand({
+      TableName: 'watch_party_users',
+      FilterExpression: 'id = :id',
+      ExpressionAttributeValues: {
+        ':id': id
+      }
+    }));
+    return res.Items && res.Items.length > 0 ? res.Items[0] : null;
+  } catch (err) {
+    console.error('[DynamoDB] getUserById error:', err);
+    return null;
+  }
+}
+
+async function getAllUsersMap() {
+  try {
+    const res = await ddbDocClient.send(new ScanCommand({
+      TableName: 'watch_party_users'
+    }));
+    const map = {};
+    if (res.Items) {
+      res.Items.forEach(user => {
+        map[user.id] = user;
+      });
+    }
+    return map;
+  } catch (err) {
+    console.error('[DynamoDB] getAllUsersMap error:', err);
+    return {};
+  }
+}
+
+async function getAcceptedFriends(userId) {
+  try {
+    const [res1, res2] = await Promise.all([
+      ddbDocClient.send(new QueryCommand({
+        TableName: 'watch_party_friendships',
+        KeyConditionExpression: 'senderId = :uId',
+        ExpressionAttributeValues: {
+          ':uId': userId
+        }
+      })),
+      ddbDocClient.send(new QueryCommand({
+        TableName: 'watch_party_friendships',
+        IndexName: 'receiverId-index',
+        KeyConditionExpression: 'receiverId = :uId',
+        ExpressionAttributeValues: {
+          ':uId': userId
+        }
+      }))
+    ]);
+
+    const friendIds = [];
+    const allRelationships = [...(res1.Items || []), ...(res2.Items || [])];
+    allRelationships.forEach(rel => {
+      if (rel.status === 'accepted') {
+        const friendId = rel.senderId === userId ? rel.receiverId : rel.senderId;
+        if (!friendIds.includes(friendId)) {
+          friendIds.push(friendId);
+        }
+      }
+    });
+    return friendIds;
+  } catch (err) {
+    console.error('[DynamoDB] getAcceptedFriends error:', err);
+    return [];
+  }
+}
+
+function getFlagEmoji(countryCode) {
+  if (!countryCode || countryCode.length !== 2) return '';
+  const codePoints = countryCode
+    .toUpperCase()
+    .split('')
+    .map(char => 127397 + char.charCodeAt(0));
+  return String.fromCodePoint(...codePoints);
+}
+
+
 // ─── Config ──────────────────────────────────────────────────────────────────
 const dev = process.env.NODE_ENV !== 'production';
 const PORT = process.env.PORT || 3000;
@@ -47,6 +190,383 @@ const nextHandler = nextApp.getRequestHandler();
 const app = express();
 const server = http.createServer(app);
 
+// ─── Authentication API Routes ───────────────────────────────────────────────
+app.use(express.json({ limit: '10mb' }));
+
+app.post('/api/auth/register', async (req, res) => {
+  const { email, password, username, country, dob } = req.body;
+  const cleanEmail = email?.trim().toLowerCase();
+  const cleanPassword = password?.trim();
+  const cleanUsername = username?.trim().toLowerCase().replace(/[^a-z0-9_]/g, '');
+
+  if (!cleanEmail || !cleanPassword || !cleanUsername) {
+    return res.status(400).json({ error: 'Email, password, and username are required' });
+  }
+
+  try {
+    const existingEmailUser = await getUserByEmail(cleanEmail);
+    if (existingEmailUser) {
+      return res.status(400).json({ error: 'Email is already registered. Please sign in.' });
+    }
+
+    const existingUsernameUser = await getUserByUsername(cleanUsername);
+    if (existingUsernameUser) {
+      return res.status(400).json({ error: 'Username is already taken' });
+    }
+
+    const passwordHash = await bcrypt.hash(cleanPassword, 10);
+
+    const newUser = {
+      email: cleanEmail,
+      username: cleanUsername,
+      id: crypto.randomUUID(),
+      passwordHash,
+      dob: dob || null,
+      country: country || 'IN',
+      avatarUrl: '',
+      isVerified: false,
+      isPrivate: false,
+      createdAt: new Date().toISOString()
+    };
+
+    await ddbDocClient.send(new PutCommand({
+      TableName: 'watch_party_users',
+      Item: newUser
+    }));
+
+    console.log(`[AUTH] User registered successfully: ${cleanUsername} (${cleanEmail})`);
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('[API Register Error]', err);
+    return res.status(500).json({ error: 'Failed to create user account' });
+  }
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  const { email, password } = req.body;
+  const cleanEmail = email?.trim().toLowerCase();
+  const cleanPassword = password?.trim();
+
+  if (!cleanEmail || !cleanPassword) {
+    return res.status(400).json({ error: 'Email and password are required' });
+  }
+
+  try {
+    const user = await getUserByEmail(cleanEmail);
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+    const isValid = await bcrypt.compare(cleanPassword, user.passwordHash);
+    if (!isValid) {
+      return res.status(401).json({ error: 'Invalid email or password' });
+    }
+
+    const token = jwt.sign(
+      { id: user.id, email: user.email, username: user.username },
+      JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    const { passwordHash, ...profile } = user;
+    const clientUserObj = {
+      ...profile,
+      avatar_url: user.avatarUrl || '',
+      is_private: user.isPrivate || false,
+      is_verified: user.isVerified || false
+    };
+
+    return res.json({ token, user: clientUserObj });
+  } catch (err) {
+    console.error('[API Login Error]', err);
+    return res.status(500).json({ error: 'Authentication failed' });
+  }
+});
+
+// ─── Profile API Routes ──────────────────────────────────────────────────────
+app.get('/api/profile', requireAuth, async (req, res) => {
+  try {
+    const user = await getUserByEmail(req.user.email);
+    if (!user) {
+      return res.status(404).json({ error: 'User profile not found' });
+    }
+    const { passwordHash, ...profile } = user;
+    const clientProfile = {
+      ...profile,
+      avatar_url: user.avatarUrl || '',
+      is_private: user.isPrivate || false,
+      is_verified: user.isVerified || false
+    };
+    return res.json(clientProfile);
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to retrieve profile' });
+  }
+});
+
+app.put('/api/profile', requireAuth, async (req, res) => {
+  const { username, avatar_url, dob, country, is_private } = req.body;
+  const cleanUsername = username?.trim().toLowerCase().replace(/[^a-z0-9_]/g, '');
+
+  if (!cleanUsername) {
+    return res.status(400).json({ error: 'Username is required' });
+  }
+
+  try {
+    const existing = await getUserByUsername(cleanUsername);
+    if (existing && existing.email !== req.user.email) {
+      return res.status(400).json({ error: 'Username is already taken' });
+    }
+
+    const currentProfile = await getUserByEmail(req.user.email);
+    if (!currentProfile) {
+      return res.status(404).json({ error: 'Profile not found' });
+    }
+
+    const updatedUser = {
+      ...currentProfile,
+      username: cleanUsername,
+      avatarUrl: avatar_url !== undefined ? avatar_url : (currentProfile.avatarUrl || ''),
+      dob: dob !== undefined ? dob : currentProfile.dob,
+      country: country !== undefined ? country : currentProfile.country,
+      isPrivate: is_private !== undefined ? is_private : (currentProfile.isPrivate || false)
+    };
+
+    await ddbDocClient.send(new PutCommand({
+      TableName: 'watch_party_users',
+      Item: updatedUser
+    }));
+
+    console.log(`[PROFILE] Profile updated for: ${cleanUsername}`);
+    const { passwordHash, ...profile } = updatedUser;
+    return res.json({
+      ...profile,
+      avatar_url: updatedUser.avatarUrl || '',
+      is_private: updatedUser.isPrivate || false,
+      is_verified: updatedUser.isVerified || false
+    });
+  } catch (err) {
+    console.error('[API Update Profile Error]', err);
+    return res.status(500).json({ error: 'Failed to update profile' });
+  }
+});
+
+// ─── Friendships API Routes ──────────────────────────────────────────────────
+app.get('/api/friends/list', requireAuth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const [res1, res2] = await Promise.all([
+      ddbDocClient.send(new QueryCommand({
+        TableName: 'watch_party_friendships',
+        KeyConditionExpression: 'senderId = :uId',
+        ExpressionAttributeValues: {
+          ':uId': userId
+        }
+      })),
+      ddbDocClient.send(new QueryCommand({
+        TableName: 'watch_party_friendships',
+        IndexName: 'receiverId-index',
+        KeyConditionExpression: 'receiverId = :uId',
+        ExpressionAttributeValues: {
+          ':uId': userId
+        }
+      }))
+    ]);
+
+    const friendships = [...(res1.Items || []), ...(res2.Items || [])];
+    const usersMap = await getAllUsersMap();
+
+    const formatted = friendships.map(rel => {
+      const sender = usersMap[rel.senderId] || { id: rel.senderId, username: rel.senderUsername || 'Unknown', avatarUrl: '', country: '' };
+      const receiver = usersMap[rel.receiverId] || { id: rel.receiverId, username: rel.receiverUsername || 'Unknown', avatarUrl: '', country: '' };
+
+      return {
+        id: rel.id,
+        sender_id: rel.senderId,
+        receiver_id: rel.receiverId,
+        status: rel.status,
+        sender: {
+          id: sender.id,
+          username: sender.username,
+          avatar_url: sender.avatarUrl || '',
+          country: sender.country || '',
+          isVerified: sender.isVerified || false
+        },
+        receiver: {
+          id: receiver.id,
+          username: receiver.username,
+          avatar_url: receiver.avatarUrl || '',
+          country: receiver.country || '',
+          isVerified: receiver.isVerified || false
+        }
+      };
+    });
+
+    return res.json(formatted);
+  } catch (err) {
+    console.error('[API Friends List Error]', err);
+    return res.status(500).json({ error: 'Failed to fetch friendships' });
+  }
+});
+
+app.post('/api/friends/request', requireAuth, async (req, res) => {
+  const { receiverId } = req.body;
+  const senderId = req.user.id;
+
+  if (!receiverId) {
+    return res.status(400).json({ error: 'Receiver ID is required' });
+  }
+
+  if (senderId === receiverId) {
+    return res.status(400).json({ error: 'You cannot send a friend request to yourself' });
+  }
+
+  try {
+    const usersMap = await getAllUsersMap();
+    const sender = usersMap[senderId];
+    const receiver = usersMap[receiverId];
+
+    if (!receiver || !sender) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    const [res1, res2] = await Promise.all([
+      ddbDocClient.send(new QueryCommand({
+        TableName: 'watch_party_friendships',
+        KeyConditionExpression: 'senderId = :s AND receiverId = :r',
+        ExpressionAttributeValues: { ':s': senderId, ':r': receiverId }
+      })),
+      ddbDocClient.send(new QueryCommand({
+        TableName: 'watch_party_friendships',
+        KeyConditionExpression: 'senderId = :s AND receiverId = :r',
+        ExpressionAttributeValues: { ':s': receiverId, ':r': senderId }
+      }))
+    ]);
+
+    const existing = [...(res1.Items || []), ...(res2.Items || [])];
+    if (existing.length > 0) {
+      return res.status(400).json({ error: 'Friendship request already exists or you are already friends.' });
+    }
+
+    const friendshipId = crypto.randomUUID();
+    const newFriendship = {
+      senderId,
+      receiverId,
+      id: friendshipId,
+      status: 'pending',
+      senderUsername: sender.username,
+      receiverUsername: receiver.username,
+      createdAt: new Date().toISOString()
+    };
+
+    await ddbDocClient.send(new PutCommand({
+      TableName: 'watch_party_friendships',
+      Item: newFriendship
+    }));
+
+    console.log(`[FRIENDS] Request sent from ${sender.username} to ${receiver.username}`);
+    return res.json({ success: true, friendshipId });
+  } catch (err) {
+    console.error('[API Send Friend Request Error]', err);
+    return res.status(500).json({ error: 'Failed to send friend request' });
+  }
+});
+
+app.put('/api/friends/:friendshipId/accept', requireAuth, async (req, res) => {
+  const { friendshipId } = req.params;
+  try {
+    const scanRes = await ddbDocClient.send(new ScanCommand({
+      TableName: 'watch_party_friendships',
+      FilterExpression: 'id = :fid',
+      ExpressionAttributeValues: { ':fid': friendshipId }
+    }));
+
+    const friendship = scanRes.Items && scanRes.Items.length > 0 ? scanRes.Items[0] : null;
+    if (!friendship) {
+      return res.status(404).json({ error: 'Friendship record not found' });
+    }
+
+    if (friendship.receiverId !== req.user.id) {
+      return res.status(403).json({ error: 'Unauthorized to accept this request' });
+    }
+
+    friendship.status = 'accepted';
+    await ddbDocClient.send(new PutCommand({
+      TableName: 'watch_party_friendships',
+      Item: friendship
+    }));
+
+    console.log(`[FRIENDS] Friendship accepted: ${friendshipId}`);
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('[API Accept Friend Request Error]', err);
+    return res.status(500).json({ error: 'Failed to accept friend request' });
+  }
+});
+
+app.delete('/api/friends/:friendshipId', requireAuth, async (req, res) => {
+  const { friendshipId } = req.params;
+  try {
+    const scanRes = await ddbDocClient.send(new ScanCommand({
+      TableName: 'watch_party_friendships',
+      FilterExpression: 'id = :fid',
+      ExpressionAttributeValues: { ':fid': friendshipId }
+    }));
+
+    const friendship = scanRes.Items && scanRes.Items.length > 0 ? scanRes.Items[0] : null;
+    if (!friendship) {
+      return res.status(404).json({ error: 'Friendship record not found' });
+    }
+
+    if (friendship.senderId !== req.user.id && friendship.receiverId !== req.user.id) {
+      return res.status(403).json({ error: 'Unauthorized to delete this friendship' });
+    }
+
+    await ddbDocClient.send(new DeleteCommand({
+      TableName: 'watch_party_friendships',
+      Key: {
+        senderId: friendship.senderId,
+        receiverId: friendship.receiverId
+      }
+    }));
+
+    console.log(`[FRIENDS] Friendship record deleted: ${friendshipId}`);
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('[API Delete Friendship Error]', err);
+    return res.status(500).json({ error: 'Failed to delete friendship' });
+  }
+});
+
+// ─── Users Search API Route ──────────────────────────────────────────────────
+app.get('/api/users/search', requireAuth, async (req, res) => {
+  const { q } = req.query;
+  if (!q || !q.trim()) {
+    return res.json([]);
+  }
+  try {
+    const cleanQ = q.trim().toLowerCase();
+    const scanRes = await ddbDocClient.send(new ScanCommand({
+      TableName: 'watch_party_users'
+    }));
+
+    const results = (scanRes.Items || [])
+      .filter(user => user.id !== req.user.id && user.username.toLowerCase().includes(cleanQ))
+      .map(user => ({
+        id: user.id,
+        username: user.username,
+        avatar_url: user.avatarUrl || '',
+        country: user.country || '',
+        is_private: user.isPrivate || false,
+        isVerified: user.isVerified || false
+      }));
+
+    return res.json(results);
+  } catch (err) {
+    console.error('[API Search Users Error]', err);
+    return res.status(500).json({ error: 'Failed to search users' });
+  }
+});
+
 // ─── Socket.IO ───────────────────────────────────────────────────────────────
 const io = new Server(server, {
   cors: {
@@ -60,55 +580,54 @@ const io = new Server(server, {
 
 // ─── Video APIs ──────────────────────────────────────────────────────────────
 
-// List available videos
-app.get('/api/videos', async (req, res) => {
+// List available videos (Filtered by RLS policies)
+app.get('/api/videos', requireAuth, async (req, res) => {
   try {
-    if (VIDEO_SOURCE === 's3') {
-      const { ListObjectsV2Command } = require('@aws-sdk/client-s3');
-      const command = new ListObjectsV2Command({
-        Bucket: S3_BUCKET,
-      });
-      console.log(`[DEBUG] Fetching videos from S3 bucket: "${S3_BUCKET}"...`);
-      const result = await s3Client.send(command);
-      console.log(`[DEBUG] S3 returned ${result.Contents?.length || 0} total objects.`);
-      
-      const videos = (result.Contents || [])
-        .filter(obj => /\.(mp4|webm|ogg|mov|mkv|avi)$/i.test(obj.Key))
-        .map(obj => ({
-          key: obj.Key,
-          name: obj.Key.replace(/^videos\//, ''),
-          size: obj.Size,
-          lastModified: obj.LastModified,
-        }));
-        
-      console.log(`[DEBUG] Filtered down to ${videos.length} valid video files:`, videos.map(v => v.name));
-      return res.json(videos);
-    }
+    const userId = req.user.id;
+    const friendIds = await getAcceptedFriends(userId);
+    const usersMap = await getAllUsersMap();
 
-    // Local: list files from ./videos/
-    const videosDir = path.join(__dirname, 'videos');
-    if (!fs.existsSync(videosDir)) {
-      fs.mkdirSync(videosDir, { recursive: true });
-      return res.json([]);
-    }
-    const files = fs.readdirSync(videosDir)
-      .filter(f => /\.(mp4|webm|ogg|mov|mkv)$/i.test(f))
-      .map(f => {
-        const stat = fs.statSync(path.join(videosDir, f));
-        return {
-          key: f,
-          name: f,
-          size: stat.size,
-          lastModified: stat.mtime,
-        };
-      });
-    res.json(files);
+    const videosRes = await ddbDocClient.send(new ScanCommand({
+      TableName: 'watch_party_videos'
+    }));
+
+    const dbVideos = videosRes.Items || [];
+
+    const filteredVideos = dbVideos.filter(v => {
+      if (v.uploaderId === userId) return true;
+      const uploader = usersMap[v.uploaderId];
+      const uploaderIsPrivate = uploader?.isPrivate || false;
+
+      if (friendIds.includes(v.uploaderId)) return true;
+
+      return !v.isPrivate && !uploaderIsPrivate;
+    });
+
+    const formatted = filteredVideos.map(v => {
+      const uploader = usersMap[v.uploaderId];
+      return {
+        key: `videos/${v.filename}`,
+        name: v.displayName || v.filename,
+        size: 0,
+        uploaderId: v.uploaderId,
+        uploaderName: uploader?.username || 'Unknown',
+        country: uploader?.country || '',
+        avatarUrl: uploader?.avatarUrl || '',
+        isPrivate: v.isPrivate || false,
+        isVerified: uploader?.isVerified || false
+      };
+    });
+
+    // Sort by createdAt descending
+    formatted.sort((a, b) => {
+      const vA = dbVideos.find(v => `videos/${v.filename}` === a.key);
+      const vB = dbVideos.find(v => `videos/${v.filename}` === b.key);
+      return new Date(vB?.createdAt || 0) - new Date(vA?.createdAt || 0);
+    });
+
+    res.json(formatted);
   } catch (err) {
-    console.error('\n[API] === FATAL ERROR LISTING VIDEOS ===');
-    console.error('[API] Error Name:', err.name);
-    console.error('[API] Error Message:', err.message);
-    console.error('[API] Full Stack Trace:\n', err);
-    console.error('========================================\n');
+    console.error('[API] Error listing videos:', err.message);
     res.status(500).json({ error: 'Failed to list videos', details: err.message });
   }
 });
@@ -116,7 +635,60 @@ app.get('/api/videos', async (req, res) => {
 // Get a video URL (pre-signed for S3, direct path for local, HLS if available)
 app.get('/api/video-url', async (req, res) => {
   const key = req.query.key;
+  const roomId = req.query.roomId;
+
   if (!key) return res.status(400).json({ error: 'Missing key' });
+
+  // 1. Check if the video is allowed to be viewed
+  let allowed = false;
+
+  // Check Option A: Active video in room session
+  if (roomId && rooms[roomId]) {
+    const roomState = rooms[roomId].state;
+    if (roomState && roomState.videoKey === key) {
+      allowed = true;
+    }
+  }
+
+  // Check Option B: Direct permission via database RLS policy
+  if (!allowed) {
+    const authHeader = req.headers.authorization;
+    const token = authHeader && authHeader.split(' ')[1];
+    if (token) {
+      try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        const baseFilename = key.replace(/^videos\//, '');
+        const videoRes = await ddbDocClient.send(new GetCommand({
+          TableName: 'watch_party_videos',
+          Key: { filename: baseFilename }
+        }));
+        const video = videoRes.Item;
+        if (video) {
+          const viewerId = decoded.id;
+          if (video.uploaderId === viewerId) {
+            allowed = true;
+          } else {
+            const friendIds = await getAcceptedFriends(viewerId);
+            if (friendIds.includes(video.uploaderId)) {
+              allowed = true;
+            } else {
+              const uploader = await getUserById(video.uploaderId);
+              const uploaderIsPrivate = uploader?.isPrivate || false;
+              if (!video.isPrivate && !uploaderIsPrivate) {
+                allowed = true;
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.error('[API] Auth check failed for video-url:', err.message);
+      }
+    }
+  }
+
+  if (!allowed) {
+    return res.status(403).json({ error: 'Forbidden: No permission to stream this video.' });
+  }
 
   try {
     if (VIDEO_SOURCE === 's3') {
@@ -384,11 +956,79 @@ async function uploadDirectoryToS3(localDirPath, s3DirKey) {
   }
 }
 
+// ─── Avatar Upload & Serving ──────────────────────────────────────────────────
+
+// Upload custom profile avatar image
+app.post('/api/profile/upload-avatar', express.json({ limit: '6mb' }), requireAuth, async (req, res) => {
+  const { data, filename, contentType } = req.body;
+  if (!data || !filename) {
+    return res.status(400).json({ error: 'Missing data or filename' });
+  }
+
+  try {
+    const base64Data = data.replace(/^data:image\/\w+;base64,/, "");
+    const buffer = Buffer.from(base64Data, 'base64');
+    
+    // Generate unique filename to avoid collision
+    const ext = path.extname(filename) || '.jpg';
+    const uniqueFilename = `${req.user.id}-${Date.now()}${ext}`;
+
+    if (VIDEO_SOURCE === 's3') {
+      const s3Key = `avatars/${uniqueFilename}`;
+      await s3Client.send(new PutObjectCommand({
+        Bucket: S3_BUCKET,
+        Key: s3Key,
+        Body: buffer,
+        ContentType: contentType || 'image/jpeg'
+      }));
+      const avatarUrl = `/api/avatar/${uniqueFilename}`;
+      res.json({ url: avatarUrl });
+    } else {
+      const avatarsDir = path.join(__dirname, 'public', 'uploads', 'avatars');
+      if (!fs.existsSync(avatarsDir)) {
+        fs.mkdirSync(avatarsDir, { recursive: true });
+      }
+      fs.writeFileSync(path.join(avatarsDir, uniqueFilename), buffer);
+      const avatarUrl = `/uploads/avatars/${uniqueFilename}`;
+      res.json({ url: avatarUrl });
+    }
+  } catch (err) {
+    console.error('[Avatar Upload] Error:', err);
+    res.status(500).json({ error: 'Failed to upload avatar', details: err.message });
+  }
+});
+
+// Serve profile avatar (especially for S3 storage)
+app.get('/api/avatar/:filename', async (req, res) => {
+  const filename = req.params.filename;
+  try {
+    if (VIDEO_SOURCE === 's3') {
+      const command = new GetObjectCommand({
+        Bucket: S3_BUCKET,
+        Key: `avatars/${filename}`
+      });
+      const s3Res = await s3Client.send(command);
+      res.setHeader('Content-Type', s3Res.ContentType || 'image/jpeg');
+      res.setHeader('Cache-Control', 'public, max-age=31536000'); // Cache for 1 year
+      s3Res.Body.pipe(res);
+    } else {
+      const filePath = path.join(__dirname, 'public', 'uploads', 'avatars', filename);
+      if (fs.existsSync(filePath)) {
+        res.sendFile(filePath);
+      } else {
+        res.status(404).send('Not found');
+      }
+    }
+  } catch (err) {
+    res.status(404).send('Avatar not found');
+  }
+});
+
 // ─── Chunked Upload System ──────────────────────────────────────────────────
 const uploads = {}; // { uploadId: { filename, totalChunks, receivedChunks, tmpDir, status } }
 
 // Initialize an upload session
-app.post('/api/upload/init', express.json(), (req, res) => {
+app.post('/api/upload/init', express.json(), requireAuth, (req, res) => {
   const { filename, totalChunks, fileSize } = req.body;
   if (!filename || !totalChunks) {
     return res.status(400).json({ error: 'Missing filename or totalChunks' });
@@ -418,7 +1058,7 @@ app.post('/api/upload/init', express.json(), (req, res) => {
 });
 
 // Receive a chunk
-app.post('/api/upload/chunk', (req, res) => {
+app.post('/api/upload/chunk', requireAuth, (req, res) => {
   const uploadId = req.headers['x-upload-id'];
   const chunkIndex = parseInt(req.headers['x-chunk-index'], 10);
 
@@ -450,7 +1090,7 @@ app.post('/api/upload/chunk', (req, res) => {
 });
 
 // Complete upload — assemble chunks and start HLS transcoding
-app.post('/api/upload/complete', express.json(), async (req, res) => {
+app.post('/api/upload/complete', express.json(), requireAuth, async (req, res) => {
   const { uploadId } = req.body;
   if (!uploadId) return res.status(400).json({ error: 'Missing uploadId' });
 
@@ -494,6 +1134,31 @@ app.post('/api/upload/complete', express.json(), async (req, res) => {
     const baseName = path.parse(upload.filename).name;
     const hlsDir = path.join(videosDir, 'hls', baseName);
 
+    // Helper to register video in DynamoDB
+    const saveVideoToDB = async () => {
+      try {
+        const uploader = await getUserById(req.user.id);
+        const newVideo = {
+          filename: upload.filename,
+          id: crypto.randomUUID(),
+          displayName: req.body.displayName || upload.filename,
+          uploaderId: req.user.id,
+          uploaderName: req.user.username,
+          uploaderCountry: uploader?.country || '',
+          isPrivate: req.body.isPrivate || false,
+          createdAt: new Date().toISOString()
+        };
+
+        await ddbDocClient.send(new PutCommand({
+          TableName: 'watch_party_videos',
+          Item: newVideo
+        }));
+        console.log(`[UPLOAD] Successfully saved video metadata in database for: ${upload.filename}`);
+      } catch (err) {
+        console.error(`[UPLOAD] DynamoDB insert threw exception:`, err.message);
+      }
+    };
+
     // Shared S3 uploader helper
     const uploadToS3AndCleanup = async (hlsDirToUpload = null) => {
       try {
@@ -524,6 +1189,7 @@ app.post('/api/upload/complete', express.json(), async (req, res) => {
           await uploadDirectoryToS3(hlsDirToUpload, `videos/hls/${baseName}`);
         }
 
+        await saveVideoToDB();
         upload.status = 'complete';
         console.log(`[UPLOAD] S3 Upload complete (including HLS chunks if transcoded): ${upload.filename}`);
         io.emit('transcode-complete', { uploadId, filename: upload.filename });
@@ -682,8 +1348,9 @@ app.post('/api/upload/complete', express.json(), async (req, res) => {
         }
       });
 
-      ffmpeg.on('close', (code) => {
+      ffmpeg.on('close', async (code) => {
         if (code === 0) {
+          await saveVideoToDB();
           upload.status = 'complete';
           console.log(`[HLS] Transcoding complete: ${upload.filename}`);
           io.emit('transcode-complete', { uploadId, filename: upload.filename });
@@ -697,6 +1364,7 @@ app.post('/api/upload/complete', express.json(), async (req, res) => {
 
       res.json({ status: 'transcoding', uploadId, filename: upload.filename });
     } else {
+      await saveVideoToDB();
       upload.status = 'complete';
       res.json({ status: 'complete', uploadId, filename: upload.filename });
     }
@@ -714,19 +1382,33 @@ app.get('/api/upload/status/:uploadId', (req, res) => {
   res.json({ status: upload.status, filename: upload.filename });
 });
 
-// Delete a video
-app.delete('/api/videos/:filename', async (req, res) => {
+// Delete a video (secure ownership check)
+app.delete('/api/videos/:filename', requireAuth, async (req, res) => {
   const filename = decodeURIComponent(req.params.filename);
   const safeName = filename.replace(/[^a-zA-Z0-9_\-.() ]/g, '');
 
   try {
+    const videoRes = await ddbDocClient.send(new GetCommand({
+      TableName: 'watch_party_videos',
+      Key: { filename: safeName }
+    }));
+    const videoRecord = videoRes.Item;
+
+    if (!videoRecord) {
+      return res.status(404).json({ error: 'Video not found in database' });
+    }
+
+    if (videoRecord.uploaderId !== req.user.id) {
+      return res.status(403).json({ error: 'Forbidden: You do not own this video' });
+    }
+
+    // 2. Clean up files
     if (VIDEO_SOURCE === 's3') {
       const command = new DeleteObjectCommand({
         Bucket: S3_BUCKET,
         Key: `videos/${safeName}`,
       });
       await s3Client.send(command);
-      return res.json({ deleted: true });
     }
 
     const filePath = path.join(__dirname, 'videos', safeName);
@@ -735,9 +1417,51 @@ app.delete('/api/videos/:filename', async (req, res) => {
 
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     if (fs.existsSync(hlsDir)) fs.rmSync(hlsDir, { recursive: true, force: true });
+
+    // 3. Delete DB record
+    await ddbDocClient.send(new DeleteCommand({
+      TableName: 'watch_party_videos',
+      Key: { filename: safeName }
+    }));
+
     res.json({ deleted: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// Toggle video privacy
+app.put('/api/videos/:videoId/privacy', requireAuth, async (req, res) => {
+  const { videoId } = req.params;
+  const { isPrivate } = req.body;
+
+  try {
+    const scanRes = await ddbDocClient.send(new ScanCommand({
+      TableName: 'watch_party_videos',
+      FilterExpression: 'id = :vid',
+      ExpressionAttributeValues: { ':vid': videoId }
+    }));
+
+    const video = scanRes.Items && scanRes.Items.length > 0 ? scanRes.Items[0] : null;
+    if (!video) {
+      return res.status(404).json({ error: 'Video not found' });
+    }
+
+    if (video.uploaderId !== req.user.id) {
+      return res.status(403).json({ error: 'Unauthorized to change privacy for this video' });
+    }
+
+    video.isPrivate = !!isPrivate;
+    await ddbDocClient.send(new PutCommand({
+      TableName: 'watch_party_videos',
+      Item: video
+    }));
+
+    console.log(`[VIDEOS] Privacy toggled for ${video.filename} to ${isPrivate}`);
+    return res.json({ success: true, isPrivate: video.isPrivate });
+  } catch (err) {
+    console.error('[API Toggle Video Privacy Error]', err);
+    return res.status(500).json({ error: 'Failed to update video privacy' });
   }
 });
 
@@ -781,7 +1505,11 @@ function getUserList(room) {
     list.push({
       id,
       username: info.username,
+      userId: info.userId,
+      avatarUrl: info.avatarUrl,
+      country: info.country,
       isHost: id === room.host,
+      isVerified: info.isVerified || false
     });
   }
   return list;
@@ -794,7 +1522,7 @@ io.on('connection', (socket) => {
   let currentUsername = null;
 
   // ── Join room ─────────────────────────────────────────────────────────────
-  socket.on('join-room', ({ roomId, username }) => {
+  socket.on('join-room', async ({ roomId, username, userId, avatarUrl, country }) => {
     // If re-joining same room (e.g. React StrictMode), clean up old join first
     if (currentRoom && currentRoom !== roomId) {
       socket.leave(currentRoom);
@@ -808,10 +1536,29 @@ io.on('connection', (socket) => {
     }
 
     currentRoom = roomId;
-    currentUsername = username || 'Viewer';
+    const userFlag = country ? ` ${getFlagEmoji(country)}` : '';
+    const formattedUsername = username ? (userFlag && username.includes(userFlag.trim()) ? username : `${username}${userFlag}`) : 'Viewer';
+    currentUsername = formattedUsername;
     socket.join(roomId);
     const room = getOrCreateRoom(roomId);
-    room.users.set(socket.id, { username: currentUsername, joinedAt: Date.now() });
+
+    // Fetch verified status from DB if userId is available
+    let dbUserVerified = false;
+    if (userId) {
+      const dbUser = await getUserById(userId);
+      if (dbUser) {
+        dbUserVerified = dbUser.isVerified || false;
+      }
+    }
+
+    room.users.set(socket.id, { 
+      username: currentUsername, 
+      userId, 
+      avatarUrl, 
+      country, 
+      isVerified: dbUserVerified,
+      joinedAt: Date.now() 
+    });
 
     if (!room.host || !room.users.has(room.host)) {
       room.host = socket.id;
