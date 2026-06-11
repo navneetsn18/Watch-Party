@@ -291,8 +291,13 @@ const VideoPlayer = forwardRef(function VideoPlayer({
       const hls = new Hls({
         maxBufferLength: 90,
         maxMaxBufferLength: 120,
+        backBufferLength: 300, // Keep 5 mins of video buffered behind the playhead to avoid re-downloading when seeking back
         startLevel: -1, // auto quality
         enableWorker: true,
+        // Explicit segment download retry configurations
+        fragLoadingMaxRetry: 6,          // Retry up to 6 times before failing
+        fragLoadingRetryDelay: 1000,     // Start retrying after 1 second
+        fragLoadingMaxRetryDelay: 8000,  // Max backoff delay is 8 seconds
       });
       hlsRef.current = hls;
       hls.loadSource(videoUrl);

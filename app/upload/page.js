@@ -41,7 +41,8 @@ export default function UploadPage() {
 
   // Listen for transcode progress via Socket.IO
   useEffect(() => {
-    if (uploadState !== 'transcoding') return;
+    const processingStates = ['assembling', 'transcoding', 's3_uploading'];
+    if (!processingStates.includes(uploadState)) return;
 
     const socket = getSocket();
 
@@ -69,6 +70,8 @@ export default function UploadPage() {
         const data = await res.json();
         if (data.status === 's3_uploading') {
           setUploadState('s3_uploading');
+        } else if (data.status === 'transcoding') {
+          setUploadState('transcoding');
         } else if (data.status === 'complete') {
           setUploadState('complete');
         } else if (data.status === 'error') {

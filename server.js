@@ -277,20 +277,15 @@ app.get('/api/hls/:videoname/:file', (req, res) => {
   }
 
   const ext = path.extname(safeFile).toLowerCase();
-  const mimeTypes = {
-    '.m3u8': 'application/vnd.apple.mpegurl',
-    '.ts': 'video/mp2t',
-  };
-  const contentType = mimeTypes[ext] || 'application/octet-stream';
+  const maxAge = ext === '.m3u8' ? 0 : 31536000;
+  const cacheControl = ext === '.m3u8' ? 'no-cache' : `public, max-age=${maxAge}`;
 
-  const stat = fs.statSync(filePath);
-  res.writeHead(200, {
-    'Content-Type': contentType,
-    'Content-Length': stat.size,
-    'Cache-Control': ext === '.m3u8' ? 'no-cache' : 'public, max-age=31536000',
-    'Access-Control-Allow-Origin': '*',
+  res.sendFile(filePath, {
+    headers: {
+      'Cache-Control': cacheControl,
+      'Access-Control-Allow-Origin': '*',
+    }
   });
-  fs.createReadStream(filePath).pipe(res);
 });
 
 // ─── HLS Segment Serving from S3 (Proxy) ────────────────────────────────────
@@ -315,12 +310,37 @@ app.get('/api/hls-s3/:videoname/:file', async (req, res) => {
 
     const s3Response = await s3Client.send(command);
 
-    res.writeHead(200, {
+    // Manual HTTP 304 handling if client has the same version
+    const s3ETag = s3Response.ETag;
+    const clientETag = req.headers['if-none-match'];
+    if (clientETag && clientETag === s3ETag) {
+      res.status(304).end();
+      return;
+    }
+
+    const clientIfModifiedSince = req.headers['if-modified-since'];
+    if (clientIfModifiedSince && s3Response.LastModified) {
+      const clientTime = new Date(clientIfModifiedSince).getTime();
+      const s3Time = new Date(s3Response.LastModified).getTime();
+      if (s3Time <= clientTime) {
+        res.status(304).end();
+        return;
+      }
+    }
+
+    const headers = {
       'Content-Type': contentType,
       'Content-Length': s3Response.ContentLength,
       'Cache-Control': ext === '.m3u8' ? 'no-cache' : 'public, max-age=31536000',
       'Access-Control-Allow-Origin': '*',
-    });
+    };
+
+    if (s3ETag) headers['ETag'] = s3ETag;
+    if (s3Response.LastModified) {
+      headers['Last-Modified'] = new Date(s3Response.LastModified).toUTCString();
+    }
+
+    res.writeHead(200, headers);
 
     if (s3Response.Body && typeof s3Response.Body.pipe === 'function') {
       s3Response.Body.pipe(res);
