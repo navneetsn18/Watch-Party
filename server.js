@@ -169,9 +169,9 @@ console.log('[DEBUG] --- Server Starting ---');
 console.log(`[DEBUG] VIDEO_SOURCE resolved to: "${VIDEO_SOURCE}"`);  
 
 // S3 support (optional)
-let s3Client, GetObjectCommand, PutObjectCommand, DeleteObjectCommand, HeadObjectCommand, getSignedUrl, S3_BUCKET;
+let s3Client, GetObjectCommand, PutObjectCommand, DeleteObjectCommand, HeadObjectCommand, getSignedUrl, S3_BUCKET, ListObjectsV2Command, DeleteObjectsCommand;
 if (VIDEO_SOURCE === 's3') {
-  const { S3Client, GetObjectCommand: GOC, ListObjectsV2Command, PutObjectCommand: POC, DeleteObjectCommand: DOC, HeadObjectCommand: HOC } = require('@aws-sdk/client-s3');
+  const { S3Client, GetObjectCommand: GOC, ListObjectsV2Command: LOV2, PutObjectCommand: POC, DeleteObjectCommand: DOC, HeadObjectCommand: HOC, DeleteObjectsCommand: DOCS } = require('@aws-sdk/client-s3');
   const { getSignedUrl: gsu } = require('@aws-sdk/s3-request-presigner');
   s3Client = new S3Client({ region: (process.env.AWS_REGION || 'us-east-1').trim() });
   GetObjectCommand = GOC;
@@ -179,6 +179,8 @@ if (VIDEO_SOURCE === 's3') {
   DeleteObjectCommand = DOC;
   HeadObjectCommand = HOC;
   getSignedUrl = gsu;
+  ListObjectsV2Command = LOV2;
+  DeleteObjectsCommand = DOCS;
   S3_BUCKET = process.env.S3_BUCKET_NAME?.trim();
   console.log(`[DEBUG] Initializing S3 Client | Region: "${process.env.AWS_REGION?.trim()}" | Bucket: "${S3_BUCKET}"`);
 }
@@ -929,10 +931,16 @@ app.get('/api/hls-s3/:videoname/:file', async (req, res) => {
 });
 
 // Helper to upload a flat folder of files to S3
-async function uploadDirectoryToS3(localDirPath, s3DirKey) {
+async function uploadDirectoryToS3(localDirPath, s3DirKey, onFileUploaded) {
   if (!fs.existsSync(localDirPath)) return;
   const files = fs.readdirSync(localDirPath);
-  for (const file of files) {
+  const tsFiles = files.filter(f => f.endsWith('.ts'));
+  const otherFiles = files.filter(f => !f.endsWith('.ts'));
+  const totalTs = tsFiles.length;
+  let uploadedTs = 0;
+
+  const allFiles = [...tsFiles, ...otherFiles];
+  for (const file of allFiles) {
     const localFilePath = path.join(localDirPath, file);
     const stat = fs.statSync(localFilePath);
     if (stat.isFile()) {
@@ -952,6 +960,13 @@ async function uploadDirectoryToS3(localDirPath, s3DirKey) {
         ContentLength: stat.size,
       });
       await s3Client.send(uploadCommand);
+
+      if (ext === '.ts') {
+        uploadedTs++;
+        if (onFileUploaded) {
+          onFileUploaded(uploadedTs, totalTs);
+        }
+      }
     }
   }
 }
@@ -1051,6 +1066,9 @@ app.post('/api/upload/init', express.json(), requireAuth, (req, res) => {
     tmpDir,
     status: 'uploading',
     createdAt: Date.now(),
+    tsCreated: 0,
+    tsUploaded: 0,
+    tsTotal: 0,
   };
 
   console.log(`[UPLOAD] Initialized: ${uploadId} | File: ${filename} | Chunks: ${totalChunks}`);
@@ -1108,10 +1126,37 @@ app.post('/api/upload/complete', express.json(), requireAuth, async (req, res) =
   console.log(`[UPLOAD] Assembling ${upload.totalChunks} chunks for: ${upload.filename}`);
 
   try {
-    // Assemble chunks
     const videosDir = path.join(__dirname, 'videos');
     if (!fs.existsSync(videosDir)) fs.mkdirSync(videosDir, { recursive: true });
 
+    // ── Collision Check & Uniqueness Renaming ──
+    const baseNameInput = path.parse(upload.filename).name;
+    const ext = path.extname(upload.filename).toLowerCase();
+
+    const checkVideoExists = async (fname) => {
+      try {
+        const res = await ddbDocClient.send(new GetCommand({
+          TableName: 'watch_party_videos',
+          Key: { filename: fname }
+        }));
+        return !!res.Item;
+      } catch {
+        return false;
+      }
+    };
+
+    let finalFilename = upload.filename;
+    let counter = 1;
+    while ((await checkVideoExists(finalFilename)) || fs.existsSync(path.join(videosDir, finalFilename))) {
+      finalFilename = `${baseNameInput}-${counter}${ext}`;
+      counter++;
+    }
+
+    upload.filename = finalFilename;
+    const baseName = path.parse(upload.filename).name;
+    const hlsDir = path.join(videosDir, 'hls', baseName);
+
+    // Assemble chunks
     const finalPath = path.join(videosDir, upload.filename);
     const writeStream = fs.createWriteStream(finalPath);
 
@@ -1131,17 +1176,17 @@ app.post('/api/upload/complete', express.json(), requireAuth, async (req, res) =
     fs.rmSync(upload.tmpDir, { recursive: true, force: true });
     console.log(`[UPLOAD] Assembled successfully: ${upload.filename}`);
 
-    const baseName = path.parse(upload.filename).name;
-    const hlsDir = path.join(videosDir, 'hls', baseName);
-
     // Helper to register video in DynamoDB
     const saveVideoToDB = async () => {
       try {
         const uploader = await getUserById(req.user.id);
+        const rawDisplayName = req.body.displayName || baseNameInput;
+        const finalDisplayName = rawDisplayName.toLowerCase().endsWith(ext) ? rawDisplayName : `${rawDisplayName}${ext}`;
+
         const newVideo = {
           filename: upload.filename,
           id: crypto.randomUUID(),
-          displayName: req.body.displayName || upload.filename,
+          displayName: finalDisplayName,
           uploaderId: req.user.id,
           uploaderName: req.user.username,
           uploaderCountry: uploader?.country || '',
@@ -1164,16 +1209,14 @@ app.post('/api/upload/complete', express.json(), requireAuth, async (req, res) =
       try {
         console.log(`[UPLOAD] Uploading raw video to S3: ${upload.filename}`);
         const fileStream = fs.createReadStream(finalPath);
-        const ext = path.extname(upload.filename).toLowerCase();
-        const contentTypes = {
+        const contentType = {
           '.mp4': 'video/mp4',
           '.webm': 'video/webm',
           '.ogg': 'video/ogg',
           '.mov': 'video/quicktime',
           '.mkv': 'video/x-matroska',
           '.avi': 'video/x-msvideo',
-        };
-        const contentType = contentTypes[ext] || 'video/mp4';
+        }[ext] || 'video/mp4';
 
         const uploadCommand = new PutObjectCommand({
           Bucket: S3_BUCKET,
@@ -1186,7 +1229,32 @@ app.post('/api/upload/complete', express.json(), requireAuth, async (req, res) =
 
         if (hlsDirToUpload && fs.existsSync(hlsDirToUpload)) {
           console.log(`[UPLOAD] Uploading HLS chunks to S3 for baseName: ${baseName}`);
-          await uploadDirectoryToS3(hlsDirToUpload, `videos/hls/${baseName}`);
+          const files = fs.readdirSync(hlsDirToUpload);
+          const tsTotal = files.filter(f => f.endsWith('.ts')).length;
+
+          upload.tsTotal = tsTotal;
+          upload.tsUploaded = 0;
+          io.emit('transcode-progress', {
+            uploadId,
+            filename: upload.filename,
+            status: 's3_uploading',
+            tsCreated: upload.tsCreated || 0,
+            tsUploaded: 0,
+            tsTotal
+          });
+
+          await uploadDirectoryToS3(hlsDirToUpload, `videos/hls/${baseName}`, (uploaded, total) => {
+            upload.tsUploaded = uploaded;
+            upload.tsTotal = total;
+            io.emit('transcode-progress', {
+              uploadId,
+              filename: upload.filename,
+              status: 's3_uploading',
+              tsCreated: upload.tsCreated || 0,
+              tsUploaded: uploaded,
+              tsTotal: total
+            });
+          });
         }
 
         await saveVideoToDB();
@@ -1223,12 +1291,12 @@ app.post('/api/upload/complete', express.json(), requireAuth, async (req, res) =
         fs.mkdirSync(hlsDir, { recursive: true });
 
         const hlsOutput = path.join(hlsDir, 'index.m3u8');
-        const ext = path.extname(upload.filename).toLowerCase();
 
-        // Use codec copy for MP4 (fast), re-encode for others
+        // Use codec copy for MP4 (fast), re-encode for others (add -threads 1 for CPU limiting)
         const ffmpegArgs = ext === '.mp4'
           ? [
               '-i', finalPath,
+              '-threads', '1',
               '-codec', 'copy',
               '-start_number', '0',
               '-hls_time', '4',
@@ -1239,9 +1307,10 @@ app.post('/api/upload/complete', express.json(), requireAuth, async (req, res) =
             ]
           : [
               '-i', finalPath,
+              '-threads', '1',
               '-c:v', 'libx264',
               '-c:a', 'aac',
-              '-preset', 'fast',
+              '-preset', 'ultrafast',
               '-crf', '23',
               '-start_number', '0',
               '-hls_time', '4',
@@ -1253,10 +1322,37 @@ app.post('/api/upload/complete', express.json(), requireAuth, async (req, res) =
 
         console.log(`[HLS] Starting transcoding for S3 upload: ${upload.filename}`);
 
-        const ffmpeg = spawn(FFMPEG_PATH, ffmpegArgs);
+        let cmd = FFMPEG_PATH;
+        let args = ffmpegArgs;
+        if (process.platform !== 'win32') {
+          cmd = 'nice';
+          args = ['-n', '19', FFMPEG_PATH, ...ffmpegArgs];
+        }
+        const ffmpeg = spawn(cmd, args);
         let ffmpegStderr = '';
 
+        let progressInterval = setInterval(() => {
+          try {
+            if (fs.existsSync(hlsDir)) {
+              const files = fs.readdirSync(hlsDir);
+              const tsCreated = files.filter(f => f.endsWith('.ts')).length;
+              upload.tsCreated = tsCreated;
+              io.emit('transcode-progress', {
+                uploadId,
+                filename: upload.filename,
+                status: 'transcoding',
+                tsCreated,
+                tsUploaded: upload.tsUploaded || 0,
+                tsTotal: upload.tsTotal || 0
+              });
+            }
+          } catch (err) {
+            console.error('Error counting HLS segments:', err);
+          }
+        }, 1000);
+
         ffmpeg.on('error', (err) => {
+          clearInterval(progressInterval);
           console.error(`[HLS] FFmpeg spawn error for S3 upload:`, err);
           upload.status = 'error';
           io.emit('transcode-error', { uploadId, filename: upload.filename });
@@ -1269,11 +1365,20 @@ app.post('/api/upload/complete', express.json(), requireAuth, async (req, res) =
           const timeMatch = data.toString().match(/time=(\d{2}):(\d{2}):(\d{2})/);
           if (timeMatch) {
             const secs = parseInt(timeMatch[1]) * 3600 + parseInt(timeMatch[2]) * 60 + parseInt(timeMatch[3]);
-            io.emit('transcode-progress', { uploadId, filename: upload.filename, seconds: secs });
+            io.emit('transcode-progress', {
+              uploadId,
+              filename: upload.filename,
+              seconds: secs,
+              status: 'transcoding',
+              tsCreated: upload.tsCreated || 0,
+              tsUploaded: upload.tsUploaded || 0,
+              tsTotal: upload.tsTotal || 0
+            });
           }
         });
 
         ffmpeg.on('close', (code) => {
+          clearInterval(progressInterval);
           if (code === 0) {
             console.log(`[HLS] Local transcoding complete, starting S3 upload: ${upload.filename}`);
             upload.status = 's3_uploading';
@@ -1300,12 +1405,12 @@ app.post('/api/upload/complete', express.json(), requireAuth, async (req, res) =
       fs.mkdirSync(hlsDir, { recursive: true });
 
       const hlsOutput = path.join(hlsDir, 'index.m3u8');
-      const ext = path.extname(upload.filename).toLowerCase();
 
-      // Use codec copy for MP4 (fast), re-encode for others
+      // Use codec copy for MP4 (fast), re-encode for others (add -threads 1 for CPU limiting)
       const ffmpegArgs = ext === '.mp4'
         ? [
             '-i', finalPath,
+            '-threads', '1',
             '-codec', 'copy',
             '-start_number', '0',
             '-hls_time', '4',
@@ -1316,9 +1421,10 @@ app.post('/api/upload/complete', express.json(), requireAuth, async (req, res) =
           ]
         : [
             '-i', finalPath,
+            '-threads', '1',
             '-c:v', 'libx264',
             '-c:a', 'aac',
-            '-preset', 'fast',
+            '-preset', 'ultrafast',
             '-crf', '23',
             '-start_number', '0',
             '-hls_time', '4',
@@ -1330,10 +1436,37 @@ app.post('/api/upload/complete', express.json(), requireAuth, async (req, res) =
 
       console.log(`[HLS] Starting local transcoding: ${upload.filename}`);
 
-      const ffmpeg = spawn(FFMPEG_PATH, ffmpegArgs);
+      let cmd = FFMPEG_PATH;
+      let args = ffmpegArgs;
+      if (process.platform !== 'win32') {
+        cmd = 'nice';
+        args = ['-n', '19', FFMPEG_PATH, ...ffmpegArgs];
+      }
+      const ffmpeg = spawn(cmd, args);
       let ffmpegStderr = '';
 
+      let progressInterval = setInterval(() => {
+        try {
+          if (fs.existsSync(hlsDir)) {
+            const files = fs.readdirSync(hlsDir);
+            const tsCreated = files.filter(f => f.endsWith('.ts')).length;
+            upload.tsCreated = tsCreated;
+            io.emit('transcode-progress', {
+              uploadId,
+              filename: upload.filename,
+              status: 'transcoding',
+              tsCreated,
+              tsUploaded: upload.tsUploaded || 0,
+              tsTotal: upload.tsTotal || 0
+            });
+          }
+        } catch (err) {
+          console.error('Error counting HLS segments:', err);
+        }
+      }, 1000);
+
       ffmpeg.on('error', (err) => {
+        clearInterval(progressInterval);
         console.error(`[HLS] FFmpeg spawn error for local transcoding:`, err);
         upload.status = 'error';
         io.emit('transcode-error', { uploadId, filename: upload.filename });
@@ -1344,11 +1477,20 @@ app.post('/api/upload/complete', express.json(), requireAuth, async (req, res) =
         const timeMatch = data.toString().match(/time=(\d{2}):(\d{2}):(\d{2})/);
         if (timeMatch) {
           const secs = parseInt(timeMatch[1]) * 3600 + parseInt(timeMatch[2]) * 60 + parseInt(timeMatch[3]);
-          io.emit('transcode-progress', { uploadId, filename: upload.filename, seconds: secs });
+          io.emit('transcode-progress', {
+            uploadId,
+            filename: upload.filename,
+            seconds: secs,
+            status: 'transcoding',
+            tsCreated: upload.tsCreated || 0,
+            tsUploaded: upload.tsUploaded || 0,
+            tsTotal: upload.tsTotal || 0
+          });
         }
       });
 
       ffmpeg.on('close', async (code) => {
+        clearInterval(progressInterval);
         if (code === 0) {
           await saveVideoToDB();
           upload.status = 'complete';
@@ -1379,7 +1521,13 @@ app.post('/api/upload/complete', express.json(), requireAuth, async (req, res) =
 app.get('/api/upload/status/:uploadId', (req, res) => {
   const upload = uploads[req.params.uploadId];
   if (!upload) return res.status(404).json({ error: 'Not found' });
-  res.json({ status: upload.status, filename: upload.filename });
+  res.json({
+    status: upload.status,
+    filename: upload.filename,
+    tsCreated: upload.tsCreated || 0,
+    tsUploaded: upload.tsUploaded || 0,
+    tsTotal: upload.tsTotal || 0
+  });
 });
 
 // Delete a video (secure ownership check)
@@ -1404,11 +1552,34 @@ app.delete('/api/videos/:filename', requireAuth, async (req, res) => {
 
     // 2. Clean up files
     if (VIDEO_SOURCE === 's3') {
-      const command = new DeleteObjectCommand({
-        Bucket: S3_BUCKET,
-        Key: `videos/${safeName}`,
-      });
-      await s3Client.send(command);
+      try {
+        const deleteRawCommand = new DeleteObjectCommand({
+          Bucket: S3_BUCKET,
+          Key: `videos/${safeName}`,
+        });
+        await s3Client.send(deleteRawCommand);
+
+        const baseName = path.parse(safeName).name;
+        // List all segments/manifest files inside the HLS folder prefix
+        const listCommand = new ListObjectsV2Command({
+          Bucket: S3_BUCKET,
+          Prefix: `videos/hls/${baseName}/`
+        });
+        const listRes = await s3Client.send(listCommand);
+
+        if (listRes.Contents && listRes.Contents.length > 0) {
+          const deleteObjectsParams = {
+            Bucket: S3_BUCKET,
+            Delete: {
+              Objects: listRes.Contents.map(obj => ({ Key: obj.Key }))
+            }
+          };
+          await s3Client.send(new DeleteObjectsCommand(deleteObjectsParams));
+        }
+        console.log(`[DELETE] Successfully deleted raw file and HLS segments from S3 for: ${safeName}`);
+      } catch (s3Err) {
+        console.error(`[DELETE] Error cleaning up S3 files:`, s3Err.message);
+      }
     }
 
     const filePath = path.join(__dirname, 'videos', safeName);

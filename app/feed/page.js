@@ -59,6 +59,33 @@ export default function FeedPage() {
     router.push(`/room/${randomCode}?username=${encodeURIComponent(name)}&video=${encodeURIComponent(videoKey)}`);
   }
 
+  async function handleDeleteVideo(videoKey) {
+    const filename = videoKey.replace(/^videos\//, '');
+    if (!confirm(`Are you sure you want to delete "${filename}"? This will permanently remove it.`)) return;
+
+    try {
+      const session = await supabase.auth.getSession();
+      const token = session.data.session?.access_token;
+      if (!token) return;
+
+      const res = await fetch('/api/videos/' + encodeURIComponent(filename), {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Failed to delete video');
+      }
+
+      setVideos(prev => prev.filter(v => v.key !== videoKey));
+    } catch (err) {
+      alert(err.message);
+    }
+  }
+
   if (loading) {
     return (
       <div className="feed-container">
@@ -130,12 +157,35 @@ export default function FeedPage() {
                     </div>
                   </div>
 
-                  <button
-                    className="btn btn-primary start-party-btn"
-                    onClick={() => startWatchParty(video.key)}
-                  >
-                    ✨ Watch Together
-                  </button>
+                  <div style={{ display: 'flex', gap: '8px', width: '100%', marginTop: '10px' }}>
+                    <button
+                      className="btn btn-primary start-party-btn"
+                      onClick={() => startWatchParty(video.key)}
+                      style={{ flex: 1 }}
+                    >
+                      ✨ Watch Together
+                    </button>
+                    {video.uploaderId === profile?.id && (
+                      <button
+                        className="btn btn-danger"
+                        onClick={() => handleDeleteVideo(video.key)}
+                        style={{
+                          padding: '0 12px',
+                          background: '#ef4444',
+                          color: '#fff',
+                          border: 'none',
+                          borderRadius: '6px',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center'
+                        }}
+                        title="Delete Video"
+                      >
+                        🗑️
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
             ))}

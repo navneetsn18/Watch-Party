@@ -38,6 +38,9 @@ export default function UploadPage() {
   const [uploadId, setUploadId] = useState(null);
   const [transcodeTime, setTranscodeTime] = useState(0);
   const [displayName, setDisplayName] = useState('');
+  const [tsCreated, setTsCreated] = useState(0);
+  const [tsUploaded, setTsUploaded] = useState(0);
+  const [tsTotal, setTsTotal] = useState(0);
 
   const fileInputRef = useRef(null);
   const abortRef = useRef(false);
@@ -64,8 +67,14 @@ export default function UploadPage() {
 
     const socket = getSocket();
 
-    function handleProgress({ uploadId: id, seconds }) {
-      if (id === uploadId) setTranscodeTime(seconds);
+    function handleProgress({ uploadId: id, seconds, status, tsCreated, tsUploaded, tsTotal }) {
+      if (id === uploadId) {
+        if (seconds !== undefined) setTranscodeTime(seconds);
+        if (status) setUploadState(status);
+        if (tsCreated !== undefined) setTsCreated(tsCreated);
+        if (tsUploaded !== undefined) setTsUploaded(tsUploaded);
+        if (tsTotal !== undefined) setTsTotal(tsTotal);
+      }
     }
     function handleComplete({ uploadId: id }) {
       if (id === uploadId) setUploadState('complete');
@@ -86,16 +95,15 @@ export default function UploadPage() {
       try {
         const res = await fetch(`/api/upload/status/${uploadId}`);
         const data = await res.json();
-        if (data.status === 's3_uploading') {
-          setUploadState('s3_uploading');
-        } else if (data.status === 'transcoding') {
-          setUploadState('transcoding');
-        } else if (data.status === 'complete') {
-          setUploadState('complete');
-        } else if (data.status === 'error') {
-          setUploadState('error');
-          setErrorMsg('Processing failed. Please check server logs.');
+        if (data.status) {
+          setUploadState(data.status);
+          if (data.status === 'error') {
+            setErrorMsg('Processing failed. Please check server logs.');
+          }
         }
+        if (data.tsCreated !== undefined) setTsCreated(data.tsCreated);
+        if (data.tsUploaded !== undefined) setTsUploaded(data.tsUploaded);
+        if (data.tsTotal !== undefined) setTsTotal(data.tsTotal);
       } catch {}
     }, 3000);
 
@@ -154,6 +162,9 @@ export default function UploadPage() {
     setProgress(0);
     setSpeed(0);
     setUploadedBytes(0);
+    setTsCreated(0);
+    setTsUploaded(0);
+    setTsTotal(0);
     startTimeRef.current = Date.now();
 
     const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
@@ -163,6 +174,10 @@ export default function UploadPage() {
       const session = await supabase.auth.getSession();
       const token = session.data.session?.access_token || '';
 
+      const extension = file.name.substring(file.name.lastIndexOf('.')).toLowerCase();
+      const baseName = displayName.trim() || file.name.replace(/\.[^/.]+$/, "");
+      const targetFilename = `${baseName}${extension}`;
+
       // 1. Initialize upload
       const initRes = await fetch('/api/upload/init', {
         method: 'POST',
@@ -171,7 +186,7 @@ export default function UploadPage() {
           'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify({
-          filename: file.name,
+          filename: targetFilename,
           totalChunks,
           fileSize: file.size,
         }),
@@ -270,6 +285,9 @@ export default function UploadPage() {
     setErrorMsg('');
     setUploadId(null);
     setTranscodeTime(0);
+    setTsCreated(0);
+    setTsUploaded(0);
+    setTsTotal(0);
   }
 
   const isUploading = uploadState === 'uploading';
@@ -469,13 +487,40 @@ export default function UploadPage() {
             </div>
 
             {uploadState === 'transcoding' && (
-              <div className="upload-transcode-info">
-                <div className="upload-transcode-pulse" />
-                <span>Processed: {formatDuration(transcodeTime)}</span>
+              <div className="upload-transcode-info" style={{ marginTop: '15px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <div className="upload-transcode-pulse" />
+                  <span>HLS Segments Created: <strong>{tsCreated}</strong> segments</span>
+                </div>
+                {transcodeTime > 0 && (
+                  <span style={{ fontSize: '13px', color: 'var(--text-muted)' }}>Processed: {formatDuration(transcodeTime)}</span>
+                )}
               </div>
             )}
 
-            <div className="upload-processing-note">
+            {uploadState === 's3_uploading' && (
+              <div className="upload-transcode-info" style={{ marginTop: '15px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <div className="upload-transcode-pulse" />
+                  <span>Uploading to S3: <strong>{tsUploaded}</strong> of <strong>{tsTotal}</strong> segments uploaded</span>
+                </div>
+                {tsTotal > 0 && (
+                  <div className="upload-progress-bar-wrap" style={{ width: '100%', maxWidth: '300px', marginTop: '5px' }}>
+                    <div className="upload-progress-bar" style={{ height: '8px', background: 'rgba(255,255,255,0.1)', borderRadius: '4px', overflow: 'hidden' }}>
+                      <div
+                        className="upload-progress-fill"
+                        style={{ width: `${Math.round((tsUploaded / tsTotal) * 100)}%`, height: '100%', background: 'linear-gradient(90deg, #3b82f6, #60a5fa)', transition: 'width 0.3s ease' }}
+                      />
+                    </div>
+                    <div style={{ textAlign: 'center', fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
+                      {Math.round((tsUploaded / tsTotal) * 100)}% Complete
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="upload-processing-note" style={{ marginTop: '15px' }}>
               This may take a few minutes for large files. You can leave this page — processing continues in the background.
             </div>
           </div>
@@ -487,7 +532,11 @@ export default function UploadPage() {
             <div className="upload-complete-icon">✅</div>
             <div className="upload-complete-title">Upload Complete!</div>
             <div className="upload-complete-subtitle">
-              {file?.name} is ready for Netflix-style streaming
+              {(() => {
+                const extension = file?.name ? file.name.substring(file.name.lastIndexOf('.')).toLowerCase() : '.mp4';
+                const base = displayName.trim() || (file?.name ? file.name.replace(/\.[^/.]+$/, "") : 'Video');
+                return base.endsWith(extension) ? base : `${base}${extension}`;
+              })()} is ready for Netflix-style streaming
             </div>
 
             <div className="upload-complete-actions">

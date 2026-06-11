@@ -156,6 +156,32 @@ function RoomContent({ roomId }) {
     }
   }, []);
 
+  const handleDeleteVideo = async (videoKey) => {
+    const filename = videoKey.replace(/^videos\//, '');
+    if (!confirm(`Are you sure you want to delete "${filename}"? This will permanently remove it.`)) return;
+
+    try {
+      const session = await supabase.auth.getSession();
+      const token = session.data.session?.access_token || '';
+
+      const res = await fetch('/api/videos/' + encodeURIComponent(filename), {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Failed to delete video');
+      }
+
+      await loadVideoList();
+    } catch (err) {
+      alert(err.message);
+    }
+  };
+
   // ── Socket connection (depends on roomId + username + profile) ──
   useEffect(() => {
     if (authLoading) return; // Wait until auth check completes
@@ -582,19 +608,46 @@ function RoomContent({ roomId }) {
                       key={v.key}
                       className={`video-item ${currentVideoKey === v.key ? 'active' : ''}`}
                       onClick={() => handleSelectVideo(v)}
+                      style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', padding: '10px' }}
                     >
-                      <span className="video-item-icon">🎬</span>
-                      <div className="video-item-details-box" style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0 }}>
-                        <span className="video-item-name" title={v.name} style={{ fontWeight: '500', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {v.name}
-                        </span>
-                        <span className="video-item-uploader" style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-                          By: {v.uploaderName}
-                          {v.isVerified && <span className="verified-badge" title="Verified Creator" style={{ color: '#3b82f6', marginLeft: '4px' }}>✔️</span>}
-                          {v.country && ` ${getFlagEmoji(v.country)}`}
-                          {v.isPrivate ? ' 🔒' : ''}
-                        </span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, flex: 1 }}>
+                        <span className="video-item-icon">🎬</span>
+                        <div className="video-item-details-box" style={{ display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1 }}>
+                          <span className="video-item-name" title={v.name} style={{ fontWeight: '500', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {v.name}
+                          </span>
+                          <span className="video-item-uploader" style={{ fontSize: '11px', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            By: {v.uploaderName}
+                            {v.isVerified && <span className="verified-badge" title="Verified Creator" style={{ color: '#3b82f6', marginLeft: '4px' }}>✔️</span>}
+                            {v.country && ` ${getFlagEmoji(v.country)}`}
+                            {v.isPrivate ? ' 🔒' : ''}
+                          </span>
+                        </div>
                       </div>
+                      {v.uploaderId === profile?.id && (
+                        <button
+                          className="btn-delete-video-sidebar"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteVideo(v.key);
+                          }}
+                          style={{
+                            background: 'none',
+                            border: 'none',
+                            color: '#ef4444',
+                            cursor: 'pointer',
+                            padding: '4px 8px',
+                            fontSize: '14px',
+                            borderRadius: '4px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center'
+                          }}
+                          title="Delete Video"
+                        >
+                          🗑️
+                        </button>
+                      )}
                     </div>
                   ))
                 )}
