@@ -170,9 +170,26 @@ console.log(`[DEBUG] VIDEO_SOURCE resolved to: "${VIDEO_SOURCE}"`);
 
 // S3 support (optional)
 let s3Client, GetObjectCommand, PutObjectCommand, DeleteObjectCommand, HeadObjectCommand, getSignedUrl, S3_BUCKET, ListObjectsV2Command, DeleteObjectsCommand;
+let CreateMultipartUploadCommand, UploadPartCommand, CompleteMultipartUploadCommand, AbortMultipartUploadCommand;
+let mediaConvertClient = null;
+
 if (process.env.S3_BUCKET_NAME?.trim()) {
-  const { S3Client, GetObjectCommand: GOC, ListObjectsV2Command: LOV2, PutObjectCommand: POC, DeleteObjectCommand: DOC, HeadObjectCommand: HOC, DeleteObjectsCommand: DOCS } = require('@aws-sdk/client-s3');
+  const { 
+    S3Client, 
+    GetObjectCommand: GOC, 
+    ListObjectsV2Command: LOV2, 
+    PutObjectCommand: POC, 
+    DeleteObjectCommand: DOC, 
+    HeadObjectCommand: HOC, 
+    DeleteObjectsCommand: DOCS,
+    CreateMultipartUploadCommand: CMUC,
+    UploadPartCommand: UPC,
+    CompleteMultipartUploadCommand: CMUC_COMP,
+    AbortMultipartUploadCommand: AMUC
+  } = require('@aws-sdk/client-s3');
   const { getSignedUrl: gsu } = require('@aws-sdk/s3-request-presigner');
+  const { MediaConvertClient, DescribeEndpointsCommand } = require('@aws-sdk/client-mediaconvert');
+
   s3Client = new S3Client({ region: (process.env.AWS_REGION || 'us-east-1').trim() });
   GetObjectCommand = GOC;
   PutObjectCommand = POC;
@@ -181,8 +198,35 @@ if (process.env.S3_BUCKET_NAME?.trim()) {
   getSignedUrl = gsu;
   ListObjectsV2Command = LOV2;
   DeleteObjectsCommand = DOCS;
+  CreateMultipartUploadCommand = CMUC;
+  UploadPartCommand = UPC;
+  CompleteMultipartUploadCommand = CMUC_COMP;
+  AbortMultipartUploadCommand = AMUC;
   S3_BUCKET = process.env.S3_BUCKET_NAME.trim();
   console.log(`[DEBUG] Initializing S3 Client | Region: "${process.env.AWS_REGION?.trim()}" | Bucket: "${S3_BUCKET}"`);
+
+  // Resolve MediaConvert Endpoint asynchronously
+  async function resolveMediaConvertEndpoint() {
+    try {
+      const tempClient = new MediaConvertClient({ region: (process.env.AWS_REGION || 'us-east-1').trim() });
+      const data = await tempClient.send(new DescribeEndpointsCommand({ MaxResults: 1 }));
+      if (data.Endpoints && data.Endpoints.length > 0) {
+        const endpointUrl = data.Endpoints[0].Url;
+        console.log(`[DEBUG] MediaConvert Custom Endpoint resolved: ${endpointUrl}`);
+        mediaConvertClient = new MediaConvertClient({
+          region: (process.env.AWS_REGION || 'us-east-1').trim(),
+          endpoint: endpointUrl
+        });
+      } else {
+        throw new Error('No endpoints returned');
+      }
+    } catch (err) {
+      console.error('[DEBUG] Failed to resolve MediaConvert endpoint via DescribeEndpoints:', err.message);
+      // Fallback: initialize without custom endpoint (SDK will attempt region default)
+      mediaConvertClient = new MediaConvertClient({ region: (process.env.AWS_REGION || 'us-east-1').trim() });
+    }
+  }
+  resolveMediaConvertEndpoint();
 }
 
 // ─── Next.js Setup ───────────────────────────────────────────────────────────
@@ -972,6 +1016,96 @@ async function uploadDirectoryToS3(localDirPath, s3DirKey, onFileUploaded) {
   }
 }
 
+// Trigger AWS Elemental MediaConvert Job
+async function triggerMediaConvertJob(filename, baseName, ext) {
+  if (!mediaConvertClient) {
+    throw new Error('MediaConvert client is not initialized');
+  }
+  if (!process.env.AWS_MEDIACONVERT_ROLE_ARN) {
+    throw new Error('AWS_MEDIACONVERT_ROLE_ARN environment variable is not set');
+  }
+
+  const { CreateJobCommand } = require('@aws-sdk/client-mediaconvert');
+  const roleArn = process.env.AWS_MEDIACONVERT_ROLE_ARN.trim();
+  const inputPath = `s3://${S3_BUCKET}/videos/${filename}`;
+  const outputPath = `s3://${S3_BUCKET}/videos/hls/${baseName}/index`;
+
+  const jobParams = {
+    Role: roleArn,
+    Settings: {
+      Inputs: [
+        {
+          FileInput: inputPath,
+          AudioSelectors: {
+            "Audio Selector 1": {
+              DefaultSelection: "DEFAULT"
+            }
+          },
+          VideoSelector: {},
+          TimecodeSource: "ZEROBASED"
+        }
+      ],
+      OutputGroups: [
+        {
+          CustomName: "HLS Output",
+          Name: "Apple HLS",
+          OutputGroupSettings: {
+            Type: "HLS_GROUP_SETTINGS",
+            HlsGroupSettings: {
+              SegmentLength: 4,
+              MinSegmentLength: 0,
+              Destination: outputPath,
+              DirectoryStructure: "SINGLE_DIRECTORY",
+              ManifestDurationFormat: "FLOATING_POINT"
+            }
+          },
+          Outputs: [
+            {
+              VideoDescription: {
+                CodecSettings: {
+                  Codec: "H_264",
+                  H264Settings: {
+                    RateControlMode: "QVBR",
+                    SceneChangeDetect: "ENABLED",
+                    MaxBitrate: 5000000,
+                    QvbrSettings: {
+                      QvbrQualityLevel: 7
+                    },
+                    GopSize: 90,
+                    GopSizeUnits: "FRAMES"
+                  }
+                },
+                Width: 1280,
+                Height: 720
+              },
+              AudioDescriptions: [
+                {
+                  CodecSettings: {
+                    Codec: "AAC",
+                    AacSettings: {
+                      Bitrate: 96000,
+                      CodingMode: "CODING_MODE_2_0",
+                      SampleRate: 48000
+                    }
+                  }
+                }
+              ],
+              OutputSettings: {
+                HlsSettings: {}
+              },
+              NameModifier: "_720p"
+            }
+          ]
+        }
+      ]
+    }
+  };
+
+  const command = new CreateJobCommand(jobParams);
+  const response = await mediaConvertClient.send(command);
+  return response.Job.Id;
+}
+
 // ─── Avatar Upload & Serving ──────────────────────────────────────────────────
 
 // Upload custom profile avatar image
@@ -1068,6 +1202,284 @@ app.get('/api/thumbnail/:filename', async (req, res) => {
 
 // ─── Chunked Upload System ──────────────────────────────────────────────────
 const uploads = {}; // { uploadId: { filename, totalChunks, receivedChunks, tmpDir, status } }
+
+// Helper to save video to database for multipart uploads
+async function saveVideoToDBForUpload(upload, req) {
+  try {
+    const uploader = await getUserById(upload.uploaderId);
+    const ext = path.extname(upload.filename).toLowerCase();
+    const finalDisplayName = upload.displayName.endsWith(ext) ? upload.displayName : `${upload.displayName}${ext}`;
+
+    const newVideo = {
+      filename: upload.filename,
+      id: crypto.randomUUID(),
+      displayName: finalDisplayName,
+      uploaderId: upload.uploaderId,
+      uploaderName: upload.uploaderName,
+      uploaderCountry: uploader?.country || '',
+      isPrivate: upload.isPrivate || false,
+      createdAt: new Date().toISOString(),
+      thumbnailUrl: upload.thumbnailUrl || ''
+    };
+
+    await ddbDocClient.send(new PutCommand({
+      TableName: 'watch_party_videos',
+      Item: newVideo
+    }));
+    console.log(`[UPLOAD] Successfully saved video metadata in database for: ${upload.filename}`);
+  } catch (err) {
+    console.error(`[UPLOAD] DynamoDB insert threw exception:`, err.message);
+  }
+}
+
+// ─── S3 Direct Multipart Upload System ───
+// Initialize multipart upload on S3
+app.post('/api/upload/multipart/initiate', express.json(), requireAuth, async (req, res) => {
+  const { filename, fileSize } = req.body;
+  if (!filename) {
+    return res.status(400).json({ error: 'Missing filename' });
+  }
+
+  if (!/\.(mp4|webm|ogg|mov|mkv|avi)$/i.test(filename)) {
+    return res.status(400).json({ error: 'Invalid file type. Supported: mp4, webm, ogg, mov, mkv, avi' });
+  }
+
+  // 6 GB Limit Check
+  const maxBytes = 6 * 1024 * 1024 * 1024;
+  if (fileSize && parseInt(fileSize, 10) > maxBytes) {
+    return res.status(400).json({ error: 'File size exceeds the 6 GB upload limit.' });
+  }
+
+  if (!s3Client || !S3_BUCKET) {
+    return res.status(400).json({ error: 'S3 storage is not configured. Direct upload disabled.' });
+  }
+
+  try {
+    const ext = path.extname(filename).toLowerCase();
+    const rawDisplayName = req.body.displayName || path.parse(filename).name;
+    const cleanBaseName = rawDisplayName.toLowerCase().endsWith(ext)
+      ? path.parse(rawDisplayName).name
+      : rawDisplayName;
+    const baseNameInput = cleanBaseName.replace(/[^a-zA-Z0-9_\-.() ]/g, '_');
+
+    // Collision check in DynamoDB
+    const checkVideoExists = async (fname) => {
+      try {
+        const res = await ddbDocClient.send(new GetCommand({
+          TableName: 'watch_party_videos',
+          Key: { filename: fname }
+        }));
+        return !!res.Item;
+      } catch {
+        return false;
+      }
+    };
+
+    let finalFilename = `${baseNameInput}${ext}`;
+    let counter = 1;
+    while (await checkVideoExists(finalFilename)) {
+      finalFilename = `${baseNameInput}-${counter}${ext}`;
+      counter++;
+    }
+
+    const s3Key = `videos/${finalFilename}`;
+    const contentTypes = {
+      '.mp4': 'video/mp4',
+      '.webm': 'video/webm',
+      '.ogg': 'video/ogg',
+      '.mov': 'video/quicktime',
+      '.mkv': 'video/x-matroska',
+      '.avi': 'video/x-msvideo',
+    };
+    const contentType = contentTypes[ext] || 'video/mp4';
+
+    const command = new CreateMultipartUploadCommand({
+      Bucket: S3_BUCKET,
+      Key: s3Key,
+      ContentType: contentType,
+    });
+    const response = await s3Client.send(command);
+
+    // Track the session
+    uploads[response.UploadId] = {
+      filename: finalFilename,
+      s3Key,
+      fileSize: parseInt(fileSize, 10) || 0,
+      status: 'uploading',
+      createdAt: Date.now(),
+      dbSaved: false,
+    };
+
+    console.log(`[MULTIPART UPLOAD] Initiated S3 Multipart: ${response.UploadId} | Key: ${s3Key}`);
+    res.json({
+      uploadId: response.UploadId,
+      key: s3Key,
+      targetFilename: finalFilename
+    });
+  } catch (err) {
+    console.error('[MULTIPART UPLOAD] Initiation failed:', err);
+    res.status(500).json({ error: 'Failed to initiate multipart upload', details: err.message });
+  }
+});
+
+// Request a presigned URL for a specific part
+app.post('/api/upload/multipart/sign-part', express.json(), requireAuth, async (req, res) => {
+  const { uploadId, key, partNumber } = req.body;
+  if (!uploadId || !key || !partNumber) {
+    return res.status(400).json({ error: 'Missing uploadId, key, or partNumber' });
+  }
+
+  try {
+    const command = new UploadPartCommand({
+      Bucket: S3_BUCKET,
+      Key: key,
+      UploadId: uploadId,
+      PartNumber: parseInt(partNumber, 10),
+    });
+
+    const url = await getSignedUrl(s3Client, command, { expiresIn: 3600 });
+    res.json({ url });
+  } catch (err) {
+    console.error('[MULTIPART UPLOAD] Signing part failed:', err);
+    res.status(500).json({ error: 'Failed to sign upload part', details: err.message });
+  }
+});
+
+// Complete the multipart upload and start MediaConvert transcoding
+app.post('/api/upload/multipart/complete', express.json({ limit: '10mb' }), requireAuth, async (req, res) => {
+  const { uploadId, key, parts, displayName, isPrivate } = req.body;
+  if (!uploadId || !key || !parts) {
+    return res.status(400).json({ error: 'Missing uploadId, key, or parts' });
+  }
+
+  const upload = uploads[uploadId];
+  if (!upload) {
+    return res.status(404).json({ error: 'Upload session not found' });
+  }
+
+  upload.status = 'assembling';
+
+  // Process video thumbnail if provided
+  let finalThumbnailUrl = '';
+  const { thumbnailData, thumbnailFilename, thumbnailContentType, thumbnailUrl } = req.body;
+
+  if (thumbnailData && thumbnailFilename) {
+    try {
+      const base64Data = thumbnailData.replace(/^data:[^;]+;base64,/, "");
+      const buffer = Buffer.from(base64Data, 'base64');
+      const thumbExt = path.extname(thumbnailFilename) || '.jpg';
+      const uniqueThumbName = `${req.user.id}-${Date.now()}${thumbExt}`;
+
+      if (s3Client && S3_BUCKET) {
+        const s3Key = `thumbnails/${uniqueThumbName}`;
+        await s3Client.send(new PutObjectCommand({
+          Bucket: S3_BUCKET,
+          Key: s3Key,
+          Body: buffer,
+          ContentType: thumbnailContentType || 'image/jpeg'
+        }));
+        finalThumbnailUrl = `/api/thumbnail/${uniqueThumbName}`;
+        console.log(`[MULTIPART UPLOAD] Thumbnail uploaded to S3: ${s3Key}`);
+      } else {
+        const thumbsDir = path.join(__dirname, 'public', 'uploads', 'thumbnails');
+        if (!fs.existsSync(thumbsDir)) {
+          fs.mkdirSync(thumbsDir, { recursive: true });
+        }
+        fs.writeFileSync(path.join(thumbsDir, uniqueThumbName), buffer);
+        finalThumbnailUrl = `/uploads/thumbnails/${uniqueThumbName}`;
+      }
+    } catch (thumbErr) {
+      console.error(`[MULTIPART UPLOAD] Failed to process thumbnail file:`, thumbErr.message);
+    }
+  } else if (thumbnailUrl) {
+    finalThumbnailUrl = thumbnailUrl;
+  }
+
+  try {
+    console.log(`[MULTIPART UPLOAD] Completing S3 Multipart: ${uploadId}`);
+    // Complete multipart upload in S3
+    const completeCommand = new CompleteMultipartUploadCommand({
+      Bucket: S3_BUCKET,
+      Key: key,
+      UploadId: uploadId,
+      MultipartUpload: {
+        Parts: parts.map(p => ({
+          ETag: p.ETag,
+          PartNumber: parseInt(p.PartNumber, 10)
+        }))
+      }
+    });
+    await s3Client.send(completeCommand);
+    console.log(`[MULTIPART UPLOAD] Completed successfully on S3: ${upload.filename}`);
+
+    const ext = path.extname(upload.filename).toLowerCase();
+    const baseName = path.parse(upload.filename).name;
+
+    // Trigger MediaConvert
+    if (mediaConvertClient && process.env.AWS_MEDIACONVERT_ROLE_ARN) {
+      upload.status = 'transcoding';
+      console.log(`[MULTIPART UPLOAD] Submitting MediaConvert job for: ${upload.filename}`);
+      
+      const jobId = await triggerMediaConvertJob(upload.filename, baseName, ext);
+      upload.jobId = jobId;
+
+      // Save references to help DB write later
+      upload.uploaderId = req.user.id;
+      upload.uploaderName = req.user.username;
+      upload.displayName = displayName || baseName;
+      upload.isPrivate = !!isPrivate;
+      upload.thumbnailUrl = finalThumbnailUrl;
+
+      console.log(`[MULTIPART UPLOAD] MediaConvert Job submitted: ${jobId}`);
+      res.json({ status: 'transcoding', uploadId, filename: upload.filename, jobId });
+    } else {
+      console.log(`[MULTIPART UPLOAD] MediaConvert is not configured. Video will remain raw.`);
+      
+      // Fallback: save to DB immediately as a raw video since we cannot transcode
+      const uploader = await getUserById(req.user.id);
+      const finalDisplayName = displayName || baseName;
+      
+      const newVideo = {
+        filename: upload.filename,
+        id: crypto.randomUUID(),
+        displayName: finalDisplayName.endsWith(ext) ? finalDisplayName : `${finalDisplayName}${ext}`,
+        uploaderId: req.user.id,
+        uploaderName: req.user.username,
+        uploaderCountry: uploader?.country || '',
+        isPrivate: !!isPrivate,
+        createdAt: new Date().toISOString(),
+        thumbnailUrl: finalThumbnailUrl || ''
+      };
+
+      await ddbDocClient.send(new PutCommand({
+        TableName: 'watch_party_videos',
+        Item: newVideo
+      }));
+
+      upload.status = 'complete';
+      io.emit('transcode-complete', { uploadId, filename: upload.filename });
+      res.json({ status: 'complete', uploadId, filename: upload.filename });
+    }
+  } catch (err) {
+    upload.status = 'error';
+    upload.errorMessage = err.message;
+    console.error(`[MULTIPART UPLOAD] Completion error:`, err);
+    
+    // Abort the S3 upload if it failed to complete so S3 storage is cleaned up
+    try {
+      await s3Client.send(new AbortMultipartUploadCommand({
+        Bucket: S3_BUCKET,
+        Key: key,
+        UploadId: uploadId
+      }));
+      console.log(`[MULTIPART UPLOAD] Aborted S3 Multipart: ${uploadId}`);
+    } catch (abortErr) {
+      console.error(`[MULTIPART UPLOAD] Abort failed:`, abortErr.message);
+    }
+
+    res.status(500).json({ error: 'Failed to assemble upload', details: err.message });
+  }
+});
 
 // Initialize an upload session
 app.post('/api/upload/init', express.json(), requireAuth, (req, res) => {
@@ -1587,12 +1999,47 @@ app.post('/api/upload/complete', express.json({ limit: '10mb' }), requireAuth, a
 });
 
 // Check upload/transcode status
-app.get('/api/upload/status/:uploadId', (req, res) => {
+app.get('/api/upload/status/:uploadId', async (req, res) => {
   const upload = uploads[req.params.uploadId];
   if (!upload) return res.status(404).json({ error: 'Not found' });
+
+  // If status is transcoding, check MediaConvert job
+  if (upload.status === 'transcoding' && upload.jobId && mediaConvertClient) {
+    const { GetJobCommand } = require('@aws-sdk/client-mediaconvert');
+    try {
+      const data = await mediaConvertClient.send(new GetJobCommand({ Id: upload.jobId }));
+      const job = data.Job;
+      
+      if (job.Status === 'COMPLETE') {
+        upload.status = 'complete';
+        if (!upload.dbSaved) {
+          await saveVideoToDBForUpload(upload, req);
+          upload.dbSaved = true;
+        }
+        io.emit('transcode-complete', { uploadId: req.params.uploadId, filename: upload.filename });
+      } else if (job.Status === 'ERROR') {
+        upload.status = 'error';
+        upload.errorMessage = job.ErrorMessage || 'MediaConvert job failed';
+        io.emit('transcode-error', { uploadId: req.params.uploadId, filename: upload.filename });
+      } else if (job.Status === 'PROGRESSING') {
+        upload.jobPercentComplete = job.JobPercentComplete || 0;
+        io.emit('transcode-progress', {
+          uploadId: req.params.uploadId,
+          filename: upload.filename,
+          status: 'transcoding',
+          jobPercentComplete: upload.jobPercentComplete
+        });
+      }
+    } catch (err) {
+      console.error(`[MEDIA_CONVERT] Error querying job status for ${upload.jobId}:`, err.message);
+    }
+  }
+
   res.json({
     status: upload.status,
     filename: upload.filename,
+    errorMessage: upload.errorMessage || '',
+    jobPercentComplete: upload.jobPercentComplete || 0,
     tsCreated: upload.tsCreated || 0,
     tsUploaded: upload.tsUploaded || 0,
     tsTotal: upload.tsTotal || 0

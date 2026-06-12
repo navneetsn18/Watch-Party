@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import { getSocket } from '../../lib/socket';
 import { supabase } from '../../lib/supabase';
 
-const CHUNK_SIZE = 2 * 1024 * 1024; // 2MB chunks
+const MULTIPART_CHUNK_SIZE = 15 * 1024 * 1024; // 15MB chunks
 const ALLOWED_TYPES = ['video/mp4', 'video/webm', 'video/ogg', 'video/quicktime', 'video/x-matroska', 'video/avi', 'video/x-msvideo'];
 const ALLOWED_EXTS = /\.(mp4|webm|ogg|mov|mkv|avi)$/i;
 
@@ -41,6 +41,7 @@ export default function UploadPage() {
   const [tsCreated, setTsCreated] = useState(0);
   const [tsUploaded, setTsUploaded] = useState(0);
   const [tsTotal, setTsTotal] = useState(0);
+  const [jobPercentComplete, setJobPercentComplete] = useState(0);
 
   // Thumbnail states
   const [thumbnailType, setThumbnailType] = useState('upload'); // upload | url
@@ -74,13 +75,14 @@ export default function UploadPage() {
 
     const socket = getSocket();
 
-    function handleProgress({ uploadId: id, seconds, status, tsCreated, tsUploaded, tsTotal }) {
+    function handleProgress({ uploadId: id, seconds, status, tsCreated, tsUploaded, tsTotal, jobPercentComplete }) {
       if (id === uploadId) {
         if (seconds !== undefined) setTranscodeTime(seconds);
         if (status) setUploadState(status);
         if (tsCreated !== undefined) setTsCreated(tsCreated);
         if (tsUploaded !== undefined) setTsUploaded(tsUploaded);
         if (tsTotal !== undefined) setTsTotal(tsTotal);
+        if (jobPercentComplete !== undefined) setJobPercentComplete(jobPercentComplete);
       }
     }
     function handleComplete({ uploadId: id }) {
@@ -105,12 +107,13 @@ export default function UploadPage() {
         if (data.status) {
           setUploadState(data.status);
           if (data.status === 'error') {
-            setErrorMsg('Processing failed. Please check server logs.');
+            setErrorMsg(data.errorMessage || 'Processing failed. Please check server logs.');
           }
         }
         if (data.tsCreated !== undefined) setTsCreated(data.tsCreated);
         if (data.tsUploaded !== undefined) setTsUploaded(data.tsUploaded);
         if (data.tsTotal !== undefined) setTsTotal(data.tsTotal);
+        if (data.jobPercentComplete !== undefined) setJobPercentComplete(data.jobPercentComplete);
       } catch {}
     }, 3000);
 
@@ -125,6 +128,13 @@ export default function UploadPage() {
   function validateFile(f) {
     if (!f) return 'No file selected';
     if (!ALLOWED_EXTS.test(f.name)) return 'Invalid file type. Use: mp4, webm, ogg, mov, mkv, avi';
+    
+    // 6 GB Limit check
+    const maxBytes = 6 * 1024 * 1024 * 1024;
+    if (f.size > maxBytes) {
+      return 'File size exceeds the 6 GB upload limit.';
+    }
+    
     return null;
   }
 
@@ -172,9 +182,10 @@ export default function UploadPage() {
     setTsCreated(0);
     setTsUploaded(0);
     setTsTotal(0);
+    setJobPercentComplete(0);
     startTimeRef.current = Date.now();
 
-    const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+    const totalChunks = Math.ceil(file.size / MULTIPART_CHUNK_SIZE);
 
     try {
       // Get current session token for authentication
@@ -186,7 +197,7 @@ export default function UploadPage() {
       const targetFilename = `${baseName}${extension}`;
 
       // 1. Initialize upload
-      const initRes = await fetch('/api/upload/init', {
+      const initRes = await fetch('/api/upload/multipart/initiate', {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
@@ -194,41 +205,65 @@ export default function UploadPage() {
         },
         body: JSON.stringify({
           filename: targetFilename,
-          totalChunks,
           fileSize: file.size,
+          displayName: baseName,
         }),
       });
       const initData = await initRes.json();
       if (!initRes.ok) throw new Error(initData.error || 'Failed to init upload');
-      const uploadId = initData.uploadId;
+      const { uploadId, key } = initData;
       setUploadId(uploadId);
 
-      // 2. Upload chunks sequentially
+      const completedParts = [];
+
+      // 2. Upload chunks sequentially directly to S3
       for (let i = 0; i < totalChunks; i++) {
         if (abortRef.current) {
           setUploadState('idle');
           return;
         }
 
-        const start = i * CHUNK_SIZE;
-        const end = Math.min(start + CHUNK_SIZE, file.size);
+        const start = i * MULTIPART_CHUNK_SIZE;
+        const end = Math.min(start + MULTIPART_CHUNK_SIZE, file.size);
         const chunk = file.slice(start, end);
+        const partNumber = i + 1; // S3 parts are 1-indexed
 
-        const res = await fetch('/api/upload/chunk', {
+        // A. Get presigned URL for this part from our server
+        const signRes = await fetch('/api/upload/multipart/sign-part', {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/octet-stream',
-            'X-Upload-Id': uploadId,
-            'X-Chunk-Index': String(i),
+            'Content-Type': 'application/json',
             'Authorization': `Bearer ${token}`
           },
-          body: chunk,
+          body: JSON.stringify({
+            uploadId,
+            key,
+            partNumber
+          })
         });
+        const signData = await signRes.json();
+        if (!signRes.ok) throw new Error(signData.error || `Failed to sign part ${partNumber}`);
+        const presignedUrl = signData.url;
 
-        if (!res.ok) {
-          const errData = await res.json().catch(() => ({}));
-          throw new Error(errData.error || `Chunk ${i} failed`);
+        // B. Upload part directly to S3
+        const uploadResponse = await fetch(presignedUrl, {
+          method: 'PUT',
+          body: chunk
+        });
+        if (!uploadResponse.ok) {
+          throw new Error(`Failed to upload part ${partNumber} to S3`);
         }
+
+        // C. Read ETag header returned by S3
+        const eTag = uploadResponse.headers.get('ETag');
+        if (!eTag) {
+          throw new Error(`S3 response missing ETag header for part ${partNumber}`);
+        }
+
+        completedParts.push({
+          PartNumber: partNumber,
+          ETag: eTag.replace(/"/g, '') // strip quotes if any
+        });
 
         const sentBytes = end;
         setUploadedBytes(sentBytes);
@@ -246,9 +281,11 @@ export default function UploadPage() {
       setUploadState('assembling');
       const payload = {
         uploadId,
+        key,
+        parts: completedParts,
         uploaderId: user?.id,
         displayName: displayName.trim() || file.name,
-        isPrivate: false // Starts public, user can toggle to private later in settings
+        isPrivate: false
       };
 
       if (thumbnailType === 'upload' && thumbnailData) {
@@ -259,7 +296,7 @@ export default function UploadPage() {
         payload.thumbnailUrl = thumbnailUrl;
       }
 
-      const completeRes = await fetch('/api/upload/complete', {
+      const completeRes = await fetch('/api/upload/multipart/complete', {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
@@ -272,8 +309,6 @@ export default function UploadPage() {
 
       if (completeData.status === 'transcoding') {
         setUploadState('transcoding');
-      } else if (completeData.status === 's3_uploading') {
-        setUploadState('s3_uploading');
       } else {
         setUploadState('complete');
       }
@@ -305,6 +340,7 @@ export default function UploadPage() {
     setTsCreated(0);
     setTsUploaded(0);
     setTsTotal(0);
+    setJobPercentComplete(0);
     setThumbnailType('upload');
     setThumbnailData(null);
     setThumbnailFilename('');
@@ -372,7 +408,7 @@ export default function UploadPage() {
                   <div className="upload-file-details">
                     <div className="upload-file-name">{file.name}</div>
                     <div className="upload-file-meta">
-                      {formatBytes(file.size)} • {Math.ceil(file.size / CHUNK_SIZE)} chunks × 2MB
+                      {formatBytes(file.size)} • {Math.ceil(file.size / MULTIPART_CHUNK_SIZE)} parts × 15MB
                     </div>
                   </div>
                   <button
@@ -397,7 +433,7 @@ export default function UploadPage() {
                     <strong>Drop a video here</strong> or click to browse
                   </div>
                   <div className="dropzone-hint">
-                    MP4, WebM, MKV, MOV, OGG, AVI
+                    MP4, WebM, MKV, MOV, OGG, AVI (Max 6 GB)
                   </div>
                 </>
               )}
@@ -523,22 +559,22 @@ export default function UploadPage() {
               <div className="upload-feature">
                 <span className="upload-feature-icon">📦</span>
                 <div>
-                  <strong>Chunked Upload</strong>
-                  <span>Files split into 2MB chunks for reliable transfer</span>
+                  <strong>S3 Direct Multipart</strong>
+                  <span>Files uploaded directly to S3 in 15MB parts for security and speed</span>
                 </div>
               </div>
               <div className="upload-feature">
                 <span className="upload-feature-icon">🎬</span>
                 <div>
-                  <strong>HLS Transcoding</strong>
-                  <span>Auto-converted to Netflix-style streaming format</span>
+                  <strong>AWS MediaConvert</strong>
+                  <span>Serverless transcoding handles massive files without loading EC2</span>
                 </div>
               </div>
               <div className="upload-feature">
                 <span className="upload-feature-icon">⚡</span>
                 <div>
-                  <strong>Instant Playback</strong>
-                  <span>4-second segments for lag-free, seekable streaming</span>
+                  <strong>HLS Stream Delivery</strong>
+                  <span>Auto-chunked into 4-second segments for smooth watch parties</span>
                 </div>
               </div>
             </div>
@@ -587,49 +623,30 @@ export default function UploadPage() {
               </div>
               <div>
                 <div className="upload-progress-title">
-                  {uploadState === 'assembling' && 'Assembling file...'}
-                  {uploadState === 's3_uploading' && 'Uploading to Amazon S3...'}
+                  {uploadState === 'assembling' && 'Finalizing upload on S3...'}
                   {uploadState === 'transcoding' && 'Converting to HLS...'}
                 </div>
                 <div className="upload-progress-subtitle">
-                  {uploadState === 'assembling' && 'Combining chunks into final video file'}
-                  {uploadState === 's3_uploading' && 'Transferring the assembled file to your S3 bucket'}
-                  {uploadState === 'transcoding' && 'FFmpeg is splitting into 4-second segments for streaming'}
+                  {uploadState === 'assembling' && 'Instructing AWS S3 to assemble the uploaded parts'}
+                  {uploadState === 'transcoding' && 'AWS Elemental MediaConvert is splitting into streaming segments'}
                 </div>
               </div>
             </div>
 
             {uploadState === 'transcoding' && (
-              <div className="upload-transcode-info" style={{ marginTop: '15px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px' }}>
+              <div className="upload-transcode-info" style={{ marginTop: '15px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', width: '100%' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <div className="upload-transcode-pulse" />
-                  <span>HLS Segments Created: <strong>{tsCreated}</strong> segments</span>
+                  <span>AWS MediaConvert Transcoding: <strong>{jobPercentComplete}%</strong> complete</span>
                 </div>
-                {transcodeTime > 0 && (
-                  <span style={{ fontSize: '13px', color: 'var(--text-muted)' }}>Processed: {formatDuration(transcodeTime)}</span>
-                )}
-              </div>
-            )}
-
-            {uploadState === 's3_uploading' && (
-              <div className="upload-transcode-info" style={{ marginTop: '15px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <div className="upload-transcode-pulse" />
-                  <span>Uploading to S3: <strong>{tsUploaded}</strong> of <strong>{tsTotal}</strong> segments uploaded</span>
-                </div>
-                {tsTotal > 0 && (
-                  <div className="upload-progress-bar-wrap" style={{ width: '100%', maxWidth: '300px', marginTop: '5px' }}>
-                    <div className="upload-progress-bar" style={{ height: '8px', background: 'rgba(255,255,255,0.1)', borderRadius: '4px', overflow: 'hidden' }}>
-                      <div
-                        className="upload-progress-fill"
-                        style={{ width: `${Math.round((tsUploaded / tsTotal) * 100)}%`, height: '100%', background: 'linear-gradient(90deg, #3b82f6, #60a5fa)', transition: 'width 0.3s ease' }}
-                      />
-                    </div>
-                    <div style={{ textAlign: 'center', fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
-                      {Math.round((tsUploaded / tsTotal) * 100)}% Complete
-                    </div>
+                <div className="upload-progress-bar-wrap" style={{ width: '100%', maxWidth: '300px', marginTop: '5px' }}>
+                  <div className="upload-progress-bar" style={{ height: '8px', background: 'rgba(255,255,255,0.1)', borderRadius: '4px', overflow: 'hidden' }}>
+                    <div
+                      className="upload-progress-fill"
+                      style={{ width: `${jobPercentComplete}%`, height: '100%', background: 'linear-gradient(90deg, #10b981, #34d399)', transition: 'width 0.3s ease' }}
+                    />
                   </div>
-                )}
+                </div>
               </div>
             )}
 
