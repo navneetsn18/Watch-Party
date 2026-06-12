@@ -156,6 +156,13 @@ export default function SearchPage() {
     return { type: 'none' };
   }
 
+  const acceptedFriends = friendships
+    .filter(f => f.status === 'accepted')
+    .map(f => {
+      const friendObj = f.sender_id === user?.id ? f.receiver : f.sender;
+      return { friendshipId: f.id, ...friendObj };
+    });
+
   if (loading) {
     return (
       <div className="search-container">
@@ -283,6 +290,57 @@ export default function SearchPage() {
             </div>
           )}
         </div>
+      </div>
+
+      {/* My Friends Section */}
+      <div className="search-card" style={{ marginTop: '24px' }}>
+        <h3 style={{ fontSize: '18px', fontWeight: '700', marginBottom: '16px', color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <span>👥</span> My Friends ({acceptedFriends.length})
+        </h3>
+        
+        {acceptedFriends.length === 0 ? (
+          <div className="notice-empty" style={{ padding: '20px', textAlign: 'center', color: 'var(--text-muted)' }}>
+            No friends added yet. Use the search bar above to find and add friends!
+          </div>
+        ) : (
+          <div className="results-list">
+            {acceptedFriends.map(friend => (
+              <div key={friend.id} className="social-user-item">
+                <div className="social-user-info">
+                  {friend.avatar_url ? (
+                    <img src={friend.avatar_url} alt="Avatar" className="social-avatar" />
+                  ) : (
+                    <div className="social-avatar-placeholder">
+                      {friend.username.charAt(0).toUpperCase()}
+                    </div>
+                  )}
+                  <div className="social-user-details">
+                    <span className="social-username">
+                      {friend.username}
+                      {friend.isVerified && <VerifiedBadge size={14} />}
+                      {friend.country && ` ${getFlagEmoji(friend.country)}`}
+                    </span>
+                    <span className="social-user-subtitle">
+                      {friend.is_private ? '🔒 Private Account' : '🌐 Public Account'}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="social-actions">
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <span className="badge badge-host">Friends</span>
+                    <button
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => cancelOrUnfriend(friend.friendshipId)}
+                    >
+                      Unfriend
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

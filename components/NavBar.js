@@ -112,6 +112,29 @@ export default function NavBar() {
       </div>
 
       <div className="navbar-actions">
+        {/* Upload Button */}
+        {user && (
+          <button
+            onClick={() => router.push('/upload')}
+            className="btn btn-primary"
+            style={{
+              fontSize: '0.85rem',
+              fontWeight: '700',
+              padding: '8px 16px',
+              borderRadius: 'var(--radius-sm)',
+              marginRight: '12px',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '6px',
+              cursor: 'pointer',
+              border: 'none',
+              height: 'auto'
+            }}
+          >
+            📤 Upload Video
+          </button>
+        )}
+
         {/* Buy Me a Coffee Button */}
         <a
           href="https://buymeacoffee.com/navneetsn18"
@@ -119,7 +142,7 @@ export default function NavBar() {
           rel="noopener noreferrer"
           className="coffee-btn"
         >
-          ☕ Buy Me a Coffee
+          ☕
         </a>
 
         {user && (

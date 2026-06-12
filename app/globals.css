@@ -3244,7 +3244,8 @@ body {
    ═══════════════════════════════════════════════════════════════ */
 
 .feed-container {
-  max-width: 1200px;
+  width: 100%;
+  max-width: 1600px;
   margin: 0 auto;
   padding: 40px 24px;
   display: flex;
@@ -3283,12 +3284,14 @@ body {
 .feed-content {
   display: flex;
   flex-direction: column;
+  width: 100%;
 }
 
 .feed-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
   gap: 24px;
+  width: 100%;
 }
 
 .feed-item-card {

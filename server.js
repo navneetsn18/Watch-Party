@@ -982,7 +982,7 @@ app.post('/api/profile/upload-avatar', express.json({ limit: '6mb' }), requireAu
   }
 
   try {
-    const base64Data = data.replace(/^data:image\/\w+;base64,/, "");
+    const base64Data = data.replace(/^data:[^;]+;base64,/, "");
     const buffer = Buffer.from(base64Data, 'base64');
     
     // Generate unique filename to avoid collision
@@ -1158,7 +1158,7 @@ app.post('/api/upload/complete', express.json({ limit: '10mb' }), requireAuth, a
 
   if (thumbnailData && thumbnailFilename) {
     try {
-      const base64Data = thumbnailData.replace(/^data:image\/\w+;base64,/, "");
+      const base64Data = thumbnailData.replace(/^data:[^;]+;base64,/, "");
       const buffer = Buffer.from(base64Data, 'base64');
       const thumbExt = path.extname(thumbnailFilename) || '.jpg';
       const uniqueThumbName = `${req.user.id}-${Date.now()}${thumbExt}`;

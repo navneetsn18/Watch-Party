@@ -444,8 +444,9 @@ export default function UploadPage() {
                   </div>
 
                   {thumbnailType === 'upload' ? (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    <div key="thumbnail-upload-wrapper" style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                       <input
+                        key="thumbnail-file-input"
                         type="file"
                         accept="image/*"
                         onChange={(e) => {
@@ -482,8 +483,9 @@ export default function UploadPage() {
                       )}
                     </div>
                   ) : (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    <div key="thumbnail-url-wrapper" style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                       <input
+                        key="thumbnail-url-input"
                         type="text"
                         className="input-field"
                         placeholder="https://example.com/thumbnail.jpg"
