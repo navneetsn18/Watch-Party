@@ -350,13 +350,26 @@ const VideoPlayer = forwardRef(function VideoPlayer({
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
         console.log('[HLS] Manifest parsed, ready to play');
       });
+      // Bounded recovery with backoff — an unconditional startLoad() retried
+      // failing streams in a tight loop forever (e.g. segments blocked by CORS),
+      // spinning the client and hammering the server with manifest requests.
+      let networkRecoveries = 0;
+      let mediaRecoveries = 0;
       hls.on(Hls.Events.ERROR, (event, data) => {
         if (data.fatal) {
           console.error('[HLS] Fatal error:', data.type, data.details);
-          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-            hls.startLoad();
-          } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          if (data.type === Hls.ErrorTypes.NETWORK_ERROR && networkRecoveries < 5) {
+            networkRecoveries++;
+            setTimeout(() => {
+              if (hlsRef.current === hls) hls.startLoad();
+            }, 1000 * networkRecoveries);
+          } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaRecoveries < 3) {
+            mediaRecoveries++;
             hls.recoverMediaError();
+          } else {
+            console.error('[HLS] Giving up after repeated fatal errors:', data.details);
+            hls.destroy();
+            if (hlsRef.current === hls) hlsRef.current = null;
           }
         }
       });
