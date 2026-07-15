@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
-import { User, Users, Tv, ShieldCheck, Mail, Globe, Calendar, Lock, Unlock, Settings, Trash2, Shield, UploadCloud, UserPlus, UserCheck, UserX, Loader2 } from 'lucide-react';
+import { User, Users, Tv, ShieldCheck, Mail, Globe, Calendar, Lock, Unlock, Settings, Trash2, Shield, UploadCloud, UserPlus, UserCheck, UserX, UserMinus, Loader2 } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { getFlagEmoji } from '../../components/NavBar';
 import { VerifiedBadge } from '../../components/VerifiedBadge';

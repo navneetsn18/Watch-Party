@@ -779,8 +779,9 @@ app.get('/api/video-url', async (req, res) => {
       return res.json({ url: `/api/hls/${encodeURIComponent(baseName)}/index.m3u8`, source: 'hls' });
     }
 
-    // Fallback: range streaming
-    res.json({ url: `/api/stream/${encodeURIComponent(key)}`, source: 'local' });
+    // Fallback: range streaming. Strip the videos/ prefix — the stream route
+    // already resolves inside the videos dir, so keeping it 404s every local video.
+    res.json({ url: `/api/stream/${encodeURIComponent(key.replace(/^videos\//, ''))}`, source: 'local' });
   } catch (err) {
     console.error('[API] Error getting video URL:', err);
     res.status(500).json({ error: 'Failed to get video URL' });
