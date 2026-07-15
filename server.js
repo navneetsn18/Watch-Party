@@ -1024,6 +1024,9 @@ async function triggerMediaConvertJob(filename, baseName, ext) {
           },
           Outputs: [
             {
+              // Required by the API — omitting it rejects the job with
+              // "containerSettings is a required property"
+              ContainerSettings: { Container: "M3U8", M3u8Settings: {} },
               VideoDescription: {
                 CodecSettings: {
                   Codec: "H_264",
