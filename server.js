@@ -1398,6 +1398,7 @@ app.post('/api/upload/multipart/complete', express.json({ limit: '10mb' }), requ
         const jobId = await triggerMediaConvertJob(upload.filename, baseName, ext);
         upload.jobId = jobId;
         console.log(`[MULTIPART UPLOAD] MediaConvert Job submitted: ${jobId}`);
+        monitorMediaConvertJob(jobId, uploadId, upload);
         return res.json({ status: 'transcoding', uploadId, filename: upload.filename, jobId });
       } catch (mcErr) {
         console.error(`[MULTIPART UPLOAD] MediaConvert submission failed (video stays raw):`, mcErr.message);
@@ -1433,38 +1434,52 @@ app.post('/api/upload/multipart/complete', express.json({ limit: '10mb' }), requ
 // Legacy server-relay chunked upload removed — uploads go browser → S3 directly
 // via the multipart endpoints above, so no video bytes ever pass through this process.
 
-// Check upload/transcode status
-app.get('/api/upload/status/:uploadId', async (req, res) => {
-  const upload = uploads[req.params.uploadId];
-  if (!upload) return res.status(404).json({ error: 'Not found' });
-
-  // If status is transcoding, check MediaConvert job
-  if (upload.status === 'transcoding' && upload.jobId && mediaConvertClient) {
-    const { GetJobCommand } = require('@aws-sdk/client-mediaconvert');
+// Server-side MediaConvert job monitor — runs regardless of whether the
+// uploader keeps their tab open, so job failures always land in the logs
+// (previously only browser polling checked the job; close the tab and an
+// ERROR — e.g. unsupported codec inside an MKV — vanished silently).
+function monitorMediaConvertJob(jobId, uploadId, upload) {
+  const { GetJobCommand } = require('@aws-sdk/client-mediaconvert');
+  const startedAt = Date.now();
+  const timer = setInterval(async () => {
+    if (Date.now() - startedAt > 2 * 60 * 60 * 1000) {
+      console.error(`[MEDIACONVERT] Giving up monitoring job ${jobId} after 2h`);
+      clearInterval(timer);
+      return;
+    }
     try {
-      const data = await mediaConvertClient.send(new GetJobCommand({ Id: upload.jobId }));
+      const data = await mediaConvertClient.send(new GetJobCommand({ Id: jobId }));
       const job = data.Job;
-      
       if (job.Status === 'COMPLETE') {
+        clearInterval(timer);
         upload.status = 'complete';
-        io.emit('transcode-complete', { uploadId: req.params.uploadId, filename: upload.filename });
+        console.log(`[MEDIACONVERT] Job ${jobId} COMPLETE — HLS ready for: ${upload.filename}`);
+        io.emit('transcode-complete', { uploadId, filename: upload.filename });
       } else if (job.Status === 'ERROR') {
+        clearInterval(timer);
         upload.status = 'error';
         upload.errorMessage = job.ErrorMessage || 'MediaConvert job failed';
-        io.emit('transcode-error', { uploadId: req.params.uploadId, filename: upload.filename });
+        console.error(`[MEDIACONVERT] Job ${jobId} FAILED for ${upload.filename} | code: ${job.ErrorCode} | ${job.ErrorMessage} — video stays raw`);
+        io.emit('transcode-error', { uploadId, filename: upload.filename });
       } else if (job.Status === 'PROGRESSING') {
         upload.jobPercentComplete = job.JobPercentComplete || 0;
         io.emit('transcode-progress', {
-          uploadId: req.params.uploadId,
+          uploadId,
           filename: upload.filename,
           status: 'transcoding',
           jobPercentComplete: upload.jobPercentComplete
         });
       }
     } catch (err) {
-      console.error(`[MEDIA_CONVERT] Error querying job status for ${upload.jobId}:`, err.message);
+      console.error(`[MEDIACONVERT] Poll failed for job ${jobId}:`, err.message);
     }
-  }
+  }, 15000);
+}
+
+// Check upload/transcode status (state is kept current by monitorMediaConvertJob)
+app.get('/api/upload/status/:uploadId', (req, res) => {
+  const upload = uploads[req.params.uploadId];
+  if (!upload) return res.status(404).json({ error: 'Not found' });
 
   res.json({
     status: upload.status,
