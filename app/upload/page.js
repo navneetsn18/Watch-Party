@@ -686,10 +686,9 @@ export default function UploadPage() {
                 <span className="text-violet-400 font-mono">{progress}%</span>
               </div>
               <div className="w-full h-2.5 bg-zinc-950 rounded-full overflow-hidden border border-zinc-900">
-                <motion.div
-                  className="h-full bg-gradient-to-r from-violet-600 to-indigo-600 rounded-full"
+                <div
+                  className="h-full bg-gradient-to-r from-violet-600 to-indigo-600 rounded-full transition-[width] duration-200 ease-out"
                   style={{ width: `${progress}%` }}
-                  transition={{ ease: 'easeOut', duration: 0.2 }}
                 />
               </div>
             </div>
