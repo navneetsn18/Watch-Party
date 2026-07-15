@@ -6,7 +6,6 @@ const { Server } = require('socket.io');
 const next = require('next');
 const fs = require('fs');
 const crypto = require('crypto');
-const { execSync, spawn } = require('child_process');
 
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, GetCommand, PutCommand, ScanCommand, QueryCommand, DeleteCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
@@ -155,15 +154,6 @@ function getFlagEmoji(countryCode) {
 const dev = process.env.NODE_ENV !== 'production';
 const PORT = process.env.PORT || 3000;
 const VIDEO_SOURCE = (process.env.VIDEO_SOURCE || 'local').trim();
-
-// Detect FFmpeg
-let FFMPEG_PATH = null;
-try {
-  FFMPEG_PATH = execSync('which ffmpeg', { encoding: 'utf-8' }).trim();
-  console.log(`[DEBUG] FFmpeg found at: ${FFMPEG_PATH}`);
-} catch {
-  console.log('[DEBUG] FFmpeg not found. HLS transcoding will be disabled.');
-}
 
 console.log('[DEBUG] --- Server Starting ---');
 console.log(`[DEBUG] VIDEO_SOURCE resolved to: "${VIDEO_SOURCE}"`);  
@@ -975,47 +965,6 @@ app.get('/api/hls-s3/:videoname/:file', async (req, res) => {
   }
 });
 
-// Helper to upload a flat folder of files to S3
-async function uploadDirectoryToS3(localDirPath, s3DirKey, onFileUploaded) {
-  if (!fs.existsSync(localDirPath)) return;
-  const files = fs.readdirSync(localDirPath);
-  const tsFiles = files.filter(f => f.endsWith('.ts'));
-  const otherFiles = files.filter(f => !f.endsWith('.ts'));
-  const totalTs = tsFiles.length;
-  let uploadedTs = 0;
-
-  const allFiles = [...tsFiles, ...otherFiles];
-  for (const file of allFiles) {
-    const localFilePath = path.join(localDirPath, file);
-    const stat = fs.statSync(localFilePath);
-    if (stat.isFile()) {
-      const fileStream = fs.createReadStream(localFilePath);
-      const ext = path.extname(file).toLowerCase();
-      const mimeTypes = {
-        '.m3u8': 'application/vnd.apple.mpegurl',
-        '.ts': 'video/mp2t',
-      };
-      const contentType = mimeTypes[ext] || 'application/octet-stream';
-
-      const uploadCommand = new PutObjectCommand({
-        Bucket: S3_BUCKET,
-        Key: `${s3DirKey}/${file}`,
-        Body: fileStream,
-        ContentType: contentType,
-        ContentLength: stat.size,
-      });
-      await s3Client.send(uploadCommand);
-
-      if (ext === '.ts') {
-        uploadedTs++;
-        if (onFileUploaded) {
-          onFileUploaded(uploadedTs, totalTs);
-        }
-      }
-    }
-  }
-}
-
 // Trigger AWS Elemental MediaConvert Job
 async function triggerMediaConvertJob(filename, baseName, ext) {
   if (!mediaConvertClient) {
@@ -1200,37 +1149,16 @@ app.get('/api/thumbnail/:filename', async (req, res) => {
   }
 });
 
-// ─── Chunked Upload System ──────────────────────────────────────────────────
-const uploads = {}; // { uploadId: { filename, totalChunks, receivedChunks, tmpDir, status } }
+// ─── Upload Session Tracking ────────────────────────────────────────────────
+const uploads = {}; // { uploadId: { filename, s3Key, fileSize, status, createdAt, jobId } }
 
-// Helper to save video to database for multipart uploads
-async function saveVideoToDBForUpload(upload, req) {
-  try {
-    const uploader = await getUserById(upload.uploaderId);
-    const ext = path.extname(upload.filename).toLowerCase();
-    const finalDisplayName = upload.displayName.endsWith(ext) ? upload.displayName : `${upload.displayName}${ext}`;
-
-    const newVideo = {
-      filename: upload.filename,
-      id: crypto.randomUUID(),
-      displayName: finalDisplayName,
-      uploaderId: upload.uploaderId,
-      uploaderName: upload.uploaderName,
-      uploaderCountry: uploader?.country || '',
-      isPrivate: upload.isPrivate || false,
-      createdAt: new Date().toISOString(),
-      thumbnailUrl: upload.thumbnailUrl || ''
-    };
-
-    await ddbDocClient.send(new PutCommand({
-      TableName: 'watch_party_videos',
-      Item: newVideo
-    }));
-    console.log(`[UPLOAD] Successfully saved video metadata in database for: ${upload.filename}`);
-  } catch (err) {
-    console.error(`[UPLOAD] DynamoDB insert threw exception:`, err.message);
+// Sweep stale upload sessions so the map never grows unbounded
+setInterval(() => {
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  for (const [id, u] of Object.entries(uploads)) {
+    if ((u.createdAt || 0) < cutoff) delete uploads[id];
   }
-}
+}, 60 * 60 * 1000);
 
 // ─── S3 Direct Multipart Upload System ───
 // Initialize multipart upload on S3
@@ -1307,7 +1235,6 @@ app.post('/api/upload/multipart/initiate', express.json(), requireAuth, async (r
       fileSize: parseInt(fileSize, 10) || 0,
       status: 'uploading',
       createdAt: Date.now(),
-      dbSaved: false,
     };
 
     console.log(`[MULTIPART UPLOAD] Initiated S3 Multipart: ${response.UploadId} | Key: ${s3Key}`);
@@ -1322,26 +1249,37 @@ app.post('/api/upload/multipart/initiate', express.json(), requireAuth, async (r
   }
 });
 
-// Request a presigned URL for a specific part
-app.post('/api/upload/multipart/sign-part', express.json(), requireAuth, async (req, res) => {
-  const { uploadId, key, partNumber } = req.body;
-  if (!uploadId || !key || !partNumber) {
-    return res.status(400).json({ error: 'Missing uploadId, key, or partNumber' });
+// Request presigned URLs for a batch of parts (signing is local HMAC — cheap)
+app.post('/api/upload/multipart/sign-parts', express.json(), requireAuth, async (req, res) => {
+  const { uploadId, key, partNumbers } = req.body;
+  if (!uploadId || !key || !Array.isArray(partNumbers) || partNumbers.length === 0) {
+    return res.status(400).json({ error: 'Missing uploadId, key, or partNumbers array' });
+  }
+  if (partNumbers.length > 200) {
+    return res.status(400).json({ error: 'Too many parts in one request (max 200)' });
+  }
+
+  const upload = uploads[uploadId];
+  if (!upload || upload.s3Key !== key) {
+    return res.status(404).json({ error: 'Upload session not found' });
   }
 
   try {
-    const command = new UploadPartCommand({
-      Bucket: S3_BUCKET,
-      Key: key,
-      UploadId: uploadId,
-      PartNumber: parseInt(partNumber, 10),
-    });
-
-    const url = await getSignedUrl(s3Client, command, { expiresIn: 3600 });
-    res.json({ url });
+    const urls = {};
+    await Promise.all(partNumbers.map(async (pn) => {
+      const command = new UploadPartCommand({
+        Bucket: S3_BUCKET,
+        Key: key,
+        UploadId: uploadId,
+        PartNumber: parseInt(pn, 10),
+      });
+      // 6h expiry so slow connections on big files don't outlive their URLs
+      urls[pn] = await getSignedUrl(s3Client, command, { expiresIn: 21600 });
+    }));
+    res.json({ urls });
   } catch (err) {
-    console.error('[MULTIPART UPLOAD] Signing part failed:', err);
-    res.status(500).json({ error: 'Failed to sign upload part', details: err.message });
+    console.error('[MULTIPART UPLOAD] Signing parts failed:', err);
+    res.status(500).json({ error: 'Failed to sign upload parts', details: err.message });
   }
 });
 
@@ -1415,51 +1353,48 @@ app.post('/api/upload/multipart/complete', express.json({ limit: '10mb' }), requ
     const ext = path.extname(upload.filename).toLowerCase();
     const baseName = path.parse(upload.filename).name;
 
-    // Trigger MediaConvert
+    // Save video to DB immediately. Playback works from the raw file right away —
+    // /api/video-url auto-switches to HLS once the MediaConvert manifest appears in S3.
+    // This makes registration independent of the client staying online or server restarts.
+    const uploader = await getUserById(req.user.id);
+    const finalDisplayName = displayName || baseName;
+
+    const newVideo = {
+      filename: upload.filename,
+      id: crypto.randomUUID(),
+      displayName: finalDisplayName.endsWith(ext) ? finalDisplayName : `${finalDisplayName}${ext}`,
+      uploaderId: req.user.id,
+      uploaderName: req.user.username,
+      uploaderCountry: uploader?.country || '',
+      isPrivate: !!isPrivate,
+      createdAt: new Date().toISOString(),
+      thumbnailUrl: finalThumbnailUrl || ''
+    };
+
+    await ddbDocClient.send(new PutCommand({
+      TableName: 'watch_party_videos',
+      Item: newVideo
+    }));
+    console.log(`[MULTIPART UPLOAD] Video registered in database: ${upload.filename}`);
+
+    // Trigger MediaConvert (optional enhancement — raw playback already works)
     if (mediaConvertClient && process.env.AWS_MEDIACONVERT_ROLE_ARN) {
-      upload.status = 'transcoding';
-      console.log(`[MULTIPART UPLOAD] Submitting MediaConvert job for: ${upload.filename}`);
-      
-      const jobId = await triggerMediaConvertJob(upload.filename, baseName, ext);
-      upload.jobId = jobId;
-
-      // Save references to help DB write later
-      upload.uploaderId = req.user.id;
-      upload.uploaderName = req.user.username;
-      upload.displayName = displayName || baseName;
-      upload.isPrivate = !!isPrivate;
-      upload.thumbnailUrl = finalThumbnailUrl;
-
-      console.log(`[MULTIPART UPLOAD] MediaConvert Job submitted: ${jobId}`);
-      res.json({ status: 'transcoding', uploadId, filename: upload.filename, jobId });
+      try {
+        upload.status = 'transcoding';
+        const jobId = await triggerMediaConvertJob(upload.filename, baseName, ext);
+        upload.jobId = jobId;
+        console.log(`[MULTIPART UPLOAD] MediaConvert Job submitted: ${jobId}`);
+        return res.json({ status: 'transcoding', uploadId, filename: upload.filename, jobId });
+      } catch (mcErr) {
+        console.error(`[MULTIPART UPLOAD] MediaConvert submission failed (video stays raw):`, mcErr.message);
+      }
     } else {
       console.log(`[MULTIPART UPLOAD] MediaConvert is not configured. Video will remain raw.`);
-      
-      // Fallback: save to DB immediately as a raw video since we cannot transcode
-      const uploader = await getUserById(req.user.id);
-      const finalDisplayName = displayName || baseName;
-      
-      const newVideo = {
-        filename: upload.filename,
-        id: crypto.randomUUID(),
-        displayName: finalDisplayName.endsWith(ext) ? finalDisplayName : `${finalDisplayName}${ext}`,
-        uploaderId: req.user.id,
-        uploaderName: req.user.username,
-        uploaderCountry: uploader?.country || '',
-        isPrivate: !!isPrivate,
-        createdAt: new Date().toISOString(),
-        thumbnailUrl: finalThumbnailUrl || ''
-      };
-
-      await ddbDocClient.send(new PutCommand({
-        TableName: 'watch_party_videos',
-        Item: newVideo
-      }));
-
-      upload.status = 'complete';
-      io.emit('transcode-complete', { uploadId, filename: upload.filename });
-      res.json({ status: 'complete', uploadId, filename: upload.filename });
     }
+
+    upload.status = 'complete';
+    io.emit('transcode-complete', { uploadId, filename: upload.filename });
+    res.json({ status: 'complete', uploadId, filename: upload.filename });
   } catch (err) {
     upload.status = 'error';
     upload.errorMessage = err.message;
@@ -1481,522 +1416,8 @@ app.post('/api/upload/multipart/complete', express.json({ limit: '10mb' }), requ
   }
 });
 
-// Initialize an upload session
-app.post('/api/upload/init', express.json(), requireAuth, (req, res) => {
-  const { filename, totalChunks, fileSize } = req.body;
-  if (!filename || !totalChunks) {
-    return res.status(400).json({ error: 'Missing filename or totalChunks' });
-  }
-
-  // Validate file extension
-  if (!/\.(mp4|webm|ogg|mov|mkv|avi)$/i.test(filename)) {
-    return res.status(400).json({ error: 'Invalid file type. Supported: mp4, webm, ogg, mov, mkv, avi' });
-  }
-
-  const uploadId = crypto.randomUUID();
-  const tmpDir = path.join(__dirname, 'videos', 'tmp', uploadId);
-  fs.mkdirSync(tmpDir, { recursive: true });
-
-  uploads[uploadId] = {
-    filename: filename.replace(/[^a-zA-Z0-9_\-.() ]/g, '_'),
-    totalChunks: parseInt(totalChunks, 10),
-    fileSize: parseInt(fileSize, 10) || 0,
-    receivedChunks: new Set(),
-    tmpDir,
-    status: 'uploading',
-    createdAt: Date.now(),
-    tsCreated: 0,
-    tsUploaded: 0,
-    tsTotal: 0,
-  };
-
-  console.log(`[UPLOAD] Initialized: ${uploadId} | File: ${filename} | Chunks: ${totalChunks}`);
-  res.json({ uploadId, status: 'ready' });
-});
-
-// Receive a chunk
-app.post('/api/upload/chunk', requireAuth, (req, res) => {
-  const uploadId = req.headers['x-upload-id'];
-  const chunkIndex = parseInt(req.headers['x-chunk-index'], 10);
-
-  if (!uploadId || isNaN(chunkIndex)) {
-    return res.status(400).json({ error: 'Missing upload ID or chunk index' });
-  }
-
-  const upload = uploads[uploadId];
-  if (!upload) {
-    return res.status(404).json({ error: 'Upload session not found' });
-  }
-
-  const chunkPath = path.join(upload.tmpDir, `chunk_${String(chunkIndex).padStart(6, '0')}`);
-  const writeStream = fs.createWriteStream(chunkPath);
-
-  req.pipe(writeStream);
-
-  writeStream.on('finish', () => {
-    upload.receivedChunks.add(chunkIndex);
-    const progress = Math.round((upload.receivedChunks.size / upload.totalChunks) * 100);
-    console.log(`[UPLOAD] ${uploadId} | Chunk ${chunkIndex + 1}/${upload.totalChunks} (${progress}%)`);
-    res.json({ received: chunkIndex, progress });
-  });
-
-  writeStream.on('error', (err) => {
-    console.error(`[UPLOAD] Write error: ${err.message}`);
-    res.status(500).json({ error: 'Failed to write chunk' });
-  });
-});
-
-// Complete upload — assemble chunks and start HLS transcoding
-app.post('/api/upload/complete', express.json({ limit: '10mb' }), requireAuth, async (req, res) => {
-  const { uploadId } = req.body;
-  if (!uploadId) return res.status(400).json({ error: 'Missing uploadId' });
-
-  const upload = uploads[uploadId];
-  if (!upload) return res.status(404).json({ error: 'Upload not found' });
-
-  // Check all chunks received
-  if (upload.receivedChunks.size < upload.totalChunks) {
-    return res.status(400).json({
-      error: `Missing chunks: received ${upload.receivedChunks.size}/${upload.totalChunks}`,
-    });
-  }
-
-  upload.status = 'assembling';
-  console.log(`[UPLOAD] Assembling ${upload.totalChunks} chunks for: ${upload.filename}`);
-
-  // Process video thumbnail if provided
-  let finalThumbnailUrl = '';
-  const { thumbnailData, thumbnailFilename, thumbnailContentType, thumbnailUrl } = req.body;
-
-  if (thumbnailData && thumbnailFilename) {
-    try {
-      const base64Data = thumbnailData.replace(/^data:[^;]+;base64,/, "");
-      const buffer = Buffer.from(base64Data, 'base64');
-      const thumbExt = path.extname(thumbnailFilename) || '.jpg';
-      const uniqueThumbName = `${req.user.id}-${Date.now()}${thumbExt}`;
-
-      if (s3Client && S3_BUCKET) {
-        const s3Key = `thumbnails/${uniqueThumbName}`;
-        await s3Client.send(new PutObjectCommand({
-          Bucket: S3_BUCKET,
-          Key: s3Key,
-          Body: buffer,
-          ContentType: thumbnailContentType || 'image/jpeg'
-        }));
-        finalThumbnailUrl = `/api/thumbnail/${uniqueThumbName}`;
-        console.log(`[UPLOAD] Thumbnail uploaded to S3: ${s3Key}`);
-      } else {
-        const thumbsDir = path.join(__dirname, 'public', 'uploads', 'thumbnails');
-        if (!fs.existsSync(thumbsDir)) {
-          fs.mkdirSync(thumbsDir, { recursive: true });
-        }
-        fs.writeFileSync(path.join(thumbsDir, uniqueThumbName), buffer);
-        finalThumbnailUrl = `/uploads/thumbnails/${uniqueThumbName}`;
-        console.log(`[UPLOAD] Thumbnail saved locally: ${uniqueThumbName}`);
-      }
-    } catch (thumbErr) {
-      console.error(`[UPLOAD] Failed to process thumbnail file:`, thumbErr.message);
-    }
-  } else if (thumbnailUrl) {
-    finalThumbnailUrl = thumbnailUrl;
-    console.log(`[UPLOAD] Using external thumbnail URL: ${finalThumbnailUrl}`);
-  }
-
-  try {
-    const videosDir = path.join(__dirname, 'videos');
-    if (!fs.existsSync(videosDir)) fs.mkdirSync(videosDir, { recursive: true });
-
-    // ── Collision Check & Uniqueness Renaming ──
-    const ext = path.extname(upload.filename).toLowerCase();
-    const rawDisplayName = req.body.displayName || path.parse(upload.filename).name;
-    const cleanBaseName = rawDisplayName.toLowerCase().endsWith(ext)
-      ? path.parse(rawDisplayName).name
-      : rawDisplayName;
-    const baseNameInput = cleanBaseName.replace(/[^a-zA-Z0-9_\-.() ]/g, '_');
-
-    const checkVideoExists = async (fname) => {
-      try {
-        const res = await ddbDocClient.send(new GetCommand({
-          TableName: 'watch_party_videos',
-          Key: { filename: fname }
-        }));
-        return !!res.Item;
-      } catch {
-        return false;
-      }
-    };
-
-    let finalFilename = `${baseNameInput}${ext}`;
-    let counter = 1;
-    while ((await checkVideoExists(finalFilename)) || fs.existsSync(path.join(videosDir, finalFilename))) {
-      finalFilename = `${baseNameInput}-${counter}${ext}`;
-      counter++;
-    }
-
-    upload.filename = finalFilename;
-    const baseName = path.parse(upload.filename).name;
-    const hlsDir = path.join(videosDir, 'hls', baseName);
-
-    // Assemble chunks
-    const finalPath = path.join(videosDir, upload.filename);
-    const writeStream = fs.createWriteStream(finalPath);
-
-    for (let i = 0; i < upload.totalChunks; i++) {
-      const chunkPath = path.join(upload.tmpDir, `chunk_${String(i).padStart(6, '0')}`);
-      const chunkData = fs.readFileSync(chunkPath);
-      writeStream.write(chunkData);
-    }
-
-    await new Promise((resolve, reject) => {
-      writeStream.on('finish', resolve);
-      writeStream.on('error', reject);
-      writeStream.end();
-    });
-
-    // Clean up tmp chunks
-    fs.rmSync(upload.tmpDir, { recursive: true, force: true });
-    console.log(`[UPLOAD] Assembled successfully: ${upload.filename}`);
-
-    // Helper to register video in DynamoDB
-    const saveVideoToDB = async () => {
-      try {
-        const uploader = await getUserById(req.user.id);
-        const finalDisplayName = rawDisplayName.toLowerCase().endsWith(ext) ? rawDisplayName : `${rawDisplayName}${ext}`;
-
-        const newVideo = {
-          filename: upload.filename,
-          id: crypto.randomUUID(),
-          displayName: finalDisplayName,
-          uploaderId: req.user.id,
-          uploaderName: req.user.username,
-          uploaderCountry: uploader?.country || '',
-          isPrivate: req.body.isPrivate || false,
-          createdAt: new Date().toISOString(),
-          thumbnailUrl: finalThumbnailUrl || ''
-        };
-
-        await ddbDocClient.send(new PutCommand({
-          TableName: 'watch_party_videos',
-          Item: newVideo
-        }));
-        console.log(`[UPLOAD] Successfully saved video metadata in database for: ${upload.filename}`);
-      } catch (err) {
-        console.error(`[UPLOAD] DynamoDB insert threw exception:`, err.message);
-      }
-    };
-
-    // Shared S3 uploader helper
-    const uploadToS3AndCleanup = async (hlsDirToUpload = null) => {
-      try {
-        console.log(`[UPLOAD] Uploading raw video to S3: ${upload.filename}`);
-        const fileStream = fs.createReadStream(finalPath);
-        const contentType = {
-          '.mp4': 'video/mp4',
-          '.webm': 'video/webm',
-          '.ogg': 'video/ogg',
-          '.mov': 'video/quicktime',
-          '.mkv': 'video/x-matroska',
-          '.avi': 'video/x-msvideo',
-        }[ext] || 'video/mp4';
-
-        const uploadCommand = new PutObjectCommand({
-          Bucket: S3_BUCKET,
-          Key: `videos/${upload.filename}`,
-          Body: fileStream,
-          ContentType: contentType,
-          ContentLength: fs.statSync(finalPath).size,
-        });
-        await s3Client.send(uploadCommand);
-
-        if (hlsDirToUpload && fs.existsSync(hlsDirToUpload)) {
-          console.log(`[UPLOAD] Uploading HLS chunks to S3 for baseName: ${baseName}`);
-          const files = fs.readdirSync(hlsDirToUpload);
-          const tsTotal = files.filter(f => f.endsWith('.ts')).length;
-
-          upload.tsTotal = tsTotal;
-          upload.tsUploaded = 0;
-          io.emit('transcode-progress', {
-            uploadId,
-            filename: upload.filename,
-            status: 's3_uploading',
-            tsCreated: upload.tsCreated || 0,
-            tsUploaded: 0,
-            tsTotal
-          });
-
-          await uploadDirectoryToS3(hlsDirToUpload, `videos/hls/${baseName}`, (uploaded, total) => {
-            upload.tsUploaded = uploaded;
-            upload.tsTotal = total;
-            io.emit('transcode-progress', {
-              uploadId,
-              filename: upload.filename,
-              status: 's3_uploading',
-              tsCreated: upload.tsCreated || 0,
-              tsUploaded: uploaded,
-              tsTotal: total
-            });
-          });
-        }
-
-        await saveVideoToDB();
-        upload.status = 'complete';
-        console.log(`[UPLOAD] S3 Upload complete (including HLS chunks if transcoded): ${upload.filename}`);
-        io.emit('transcode-complete', { uploadId, filename: upload.filename });
-      } catch (err) {
-        upload.status = 'error';
-        console.error(`[UPLOAD] S3 Upload failed:`, err);
-        io.emit('transcode-error', { uploadId, filename: upload.filename });
-      } finally {
-        try {
-          if (fs.existsSync(finalPath)) {
-            fs.unlinkSync(finalPath);
-            console.log(`[UPLOAD] Cleaned up local raw file: ${finalPath}`);
-          }
-        } catch (cleanupErr) {
-          console.error(`[UPLOAD] Failed to clean up local raw file: ${cleanupErr.message}`);
-        }
-        try {
-          if (hlsDirToUpload && fs.existsSync(hlsDirToUpload)) {
-            fs.rmSync(hlsDirToUpload, { recursive: true, force: true });
-            console.log(`[UPLOAD] Cleaned up local HLS dir: ${hlsDirToUpload}`);
-          }
-        } catch (cleanupErr) {
-          console.error(`[UPLOAD] Failed to clean up local HLS dir: ${cleanupErr.message}`);
-        }
-      }
-    };
-
-    if (VIDEO_SOURCE === 's3') {
-      if (FFMPEG_PATH) {
-        upload.status = 'transcoding';
-        fs.mkdirSync(hlsDir, { recursive: true });
-
-        const hlsOutput = path.join(hlsDir, 'index.m3u8');
-
-        // Use codec copy for MP4 (fast), re-encode for others (add -threads 1 for CPU limiting)
-        const ffmpegArgs = ext === '.mp4'
-          ? [
-              '-i', finalPath,
-              '-threads', '1',
-              '-codec', 'copy',
-              '-start_number', '0',
-              '-hls_time', '4',
-              '-hls_list_size', '0',
-              '-hls_segment_filename', path.join(hlsDir, 'segment%03d.ts'),
-              '-f', 'hls',
-              hlsOutput,
-            ]
-          : [
-              '-i', finalPath,
-              '-threads', '1',
-              '-c:v', 'libx264',
-              '-c:a', 'aac',
-              '-preset', 'ultrafast',
-              '-crf', '23',
-              '-start_number', '0',
-              '-hls_time', '4',
-              '-hls_list_size', '0',
-              '-hls_segment_filename', path.join(hlsDir, 'segment%03d.ts'),
-              '-f', 'hls',
-              hlsOutput,
-            ];
-
-        console.log(`[HLS] Starting transcoding for S3 upload: ${upload.filename}`);
-
-        let cmd = FFMPEG_PATH;
-        let args = ffmpegArgs;
-        if (process.platform !== 'win32') {
-          cmd = 'nice';
-          args = ['-n', '19', FFMPEG_PATH, ...ffmpegArgs];
-        }
-        const ffmpeg = spawn(cmd, args);
-        let ffmpegStderr = '';
-
-        let progressInterval = setInterval(() => {
-          try {
-            if (fs.existsSync(hlsDir)) {
-              const files = fs.readdirSync(hlsDir);
-              const tsCreated = files.filter(f => f.endsWith('.ts')).length;
-              upload.tsCreated = tsCreated;
-              io.emit('transcode-progress', {
-                uploadId,
-                filename: upload.filename,
-                status: 'transcoding',
-                tsCreated,
-                tsUploaded: upload.tsUploaded || 0,
-                tsTotal: upload.tsTotal || 0
-              });
-            }
-          } catch (err) {
-            console.error('Error counting HLS segments:', err);
-          }
-        }, 1000);
-
-        ffmpeg.on('error', (err) => {
-          clearInterval(progressInterval);
-          console.error(`[HLS] FFmpeg spawn error for S3 upload:`, err);
-          upload.status = 'error';
-          io.emit('transcode-error', { uploadId, filename: upload.filename });
-          try { if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath); } catch {}
-          try { if (fs.existsSync(hlsDir)) fs.rmSync(hlsDir, { recursive: true, force: true }); } catch {}
-        });
-
-        ffmpeg.stderr.on('data', (data) => {
-          ffmpegStderr += data.toString();
-          const timeMatch = data.toString().match(/time=(\d{2}):(\d{2}):(\d{2})/);
-          if (timeMatch) {
-            const secs = parseInt(timeMatch[1]) * 3600 + parseInt(timeMatch[2]) * 60 + parseInt(timeMatch[3]);
-            io.emit('transcode-progress', {
-              uploadId,
-              filename: upload.filename,
-              seconds: secs,
-              status: 'transcoding',
-              tsCreated: upload.tsCreated || 0,
-              tsUploaded: upload.tsUploaded || 0,
-              tsTotal: upload.tsTotal || 0
-            });
-          }
-        });
-
-        ffmpeg.on('close', (code) => {
-          clearInterval(progressInterval);
-          if (code === 0) {
-            console.log(`[HLS] Local transcoding complete, starting S3 upload: ${upload.filename}`);
-            upload.status = 's3_uploading';
-            uploadToS3AndCleanup(hlsDir);
-          } else {
-            upload.status = 'error';
-            console.error(`[HLS] Transcoding failed (code ${code}): ${upload.filename}`);
-            console.error(`[HLS] FFmpeg stderr: ${ffmpegStderr.slice(-500)}`);
-            io.emit('transcode-error', { uploadId, filename: upload.filename });
-            // Clean up raw and transcode attempts
-            try { if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath); } catch {}
-            try { if (fs.existsSync(hlsDir)) fs.rmSync(hlsDir, { recursive: true, force: true }); } catch {}
-          }
-        });
-
-        res.json({ status: 'transcoding', uploadId, filename: upload.filename });
-      } else {
-        upload.status = 's3_uploading';
-        uploadToS3AndCleanup(null);
-        res.json({ status: 's3_uploading', uploadId, filename: upload.filename });
-      }
-    } else if (FFMPEG_PATH) {
-      upload.status = 'transcoding';
-      fs.mkdirSync(hlsDir, { recursive: true });
-
-      const hlsOutput = path.join(hlsDir, 'index.m3u8');
-
-      // Use codec copy for MP4 (fast), re-encode for others (add -threads 1 for CPU limiting)
-      const ffmpegArgs = ext === '.mp4'
-        ? [
-            '-i', finalPath,
-            '-threads', '1',
-            '-codec', 'copy',
-            '-start_number', '0',
-            '-hls_time', '4',
-            '-hls_list_size', '0',
-            '-hls_segment_filename', path.join(hlsDir, 'segment%03d.ts'),
-            '-f', 'hls',
-            hlsOutput,
-          ]
-        : [
-            '-i', finalPath,
-            '-threads', '1',
-            '-c:v', 'libx264',
-            '-c:a', 'aac',
-            '-preset', 'ultrafast',
-            '-crf', '23',
-            '-start_number', '0',
-            '-hls_time', '4',
-            '-hls_list_size', '0',
-            '-hls_segment_filename', path.join(hlsDir, 'segment%03d.ts'),
-            '-f', 'hls',
-            hlsOutput,
-          ];
-
-      console.log(`[HLS] Starting local transcoding: ${upload.filename}`);
-
-      let cmd = FFMPEG_PATH;
-      let args = ffmpegArgs;
-      if (process.platform !== 'win32') {
-        cmd = 'nice';
-        args = ['-n', '19', FFMPEG_PATH, ...ffmpegArgs];
-      }
-      const ffmpeg = spawn(cmd, args);
-      let ffmpegStderr = '';
-
-      let progressInterval = setInterval(() => {
-        try {
-          if (fs.existsSync(hlsDir)) {
-            const files = fs.readdirSync(hlsDir);
-            const tsCreated = files.filter(f => f.endsWith('.ts')).length;
-            upload.tsCreated = tsCreated;
-            io.emit('transcode-progress', {
-              uploadId,
-              filename: upload.filename,
-              status: 'transcoding',
-              tsCreated,
-              tsUploaded: upload.tsUploaded || 0,
-              tsTotal: upload.tsTotal || 0
-            });
-          }
-        } catch (err) {
-          console.error('Error counting HLS segments:', err);
-        }
-      }, 1000);
-
-      ffmpeg.on('error', (err) => {
-        clearInterval(progressInterval);
-        console.error(`[HLS] FFmpeg spawn error for local transcoding:`, err);
-        upload.status = 'error';
-        io.emit('transcode-error', { uploadId, filename: upload.filename });
-      });
-
-      ffmpeg.stderr.on('data', (data) => {
-        ffmpegStderr += data.toString();
-        const timeMatch = data.toString().match(/time=(\d{2}):(\d{2}):(\d{2})/);
-        if (timeMatch) {
-          const secs = parseInt(timeMatch[1]) * 3600 + parseInt(timeMatch[2]) * 60 + parseInt(timeMatch[3]);
-          io.emit('transcode-progress', {
-            uploadId,
-            filename: upload.filename,
-            seconds: secs,
-            status: 'transcoding',
-            tsCreated: upload.tsCreated || 0,
-            tsUploaded: upload.tsUploaded || 0,
-            tsTotal: upload.tsTotal || 0
-          });
-        }
-      });
-
-      ffmpeg.on('close', async (code) => {
-        clearInterval(progressInterval);
-        if (code === 0) {
-          await saveVideoToDB();
-          upload.status = 'complete';
-          console.log(`[HLS] Transcoding complete: ${upload.filename}`);
-          io.emit('transcode-complete', { uploadId, filename: upload.filename });
-        } else {
-          upload.status = 'error';
-          console.error(`[HLS] Transcoding failed (code ${code}): ${upload.filename}`);
-          console.error(`[HLS] FFmpeg stderr: ${ffmpegStderr.slice(-500)}`);
-          io.emit('transcode-error', { uploadId, filename: upload.filename });
-        }
-      });
-
-      res.json({ status: 'transcoding', uploadId, filename: upload.filename });
-    } else {
-      await saveVideoToDB();
-      upload.status = 'complete';
-      res.json({ status: 'complete', uploadId, filename: upload.filename });
-    }
-  } catch (err) {
-    upload.status = 'error';
-    console.error(`[UPLOAD] Assembly error: ${err.message}`);
-    res.status(500).json({ error: 'Failed to assemble upload', details: err.message });
-  }
-});
+// Legacy server-relay chunked upload removed — uploads go browser → S3 directly
+// via the multipart endpoints above, so no video bytes ever pass through this process.
 
 // Check upload/transcode status
 app.get('/api/upload/status/:uploadId', async (req, res) => {
@@ -2012,10 +1433,6 @@ app.get('/api/upload/status/:uploadId', async (req, res) => {
       
       if (job.Status === 'COMPLETE') {
         upload.status = 'complete';
-        if (!upload.dbSaved) {
-          await saveVideoToDBForUpload(upload, req);
-          upload.dbSaved = true;
-        }
         io.emit('transcode-complete', { uploadId: req.params.uploadId, filename: upload.filename });
       } else if (job.Status === 'ERROR') {
         upload.status = 'error';

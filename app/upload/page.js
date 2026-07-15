@@ -5,7 +5,9 @@ import { useRouter } from 'next/navigation';
 import { getSocket } from '../../lib/socket';
 import { supabase } from '../../lib/supabase';
 
-const MULTIPART_CHUNK_SIZE = 15 * 1024 * 1024; // 15MB chunks
+const MULTIPART_CHUNK_SIZE = 100 * 1024 * 1024; // 100MB parts — 6GB = 60 parts instead of 410
+const UPLOAD_CONCURRENCY = 4; // parallel part uploads
+const PART_MAX_RETRIES = 3;
 const ALLOWED_TYPES = ['video/mp4', 'video/webm', 'video/ogg', 'video/quicktime', 'video/x-matroska', 'video/avi', 'video/x-msvideo'];
 const ALLOWED_EXTS = /\.(mp4|webm|ogg|mov|mkv|avi)$/i;
 
@@ -214,70 +216,91 @@ export default function UploadPage() {
       const { uploadId, key } = initData;
       setUploadId(uploadId);
 
-      const completedParts = [];
-
-      // 2. Upload chunks sequentially directly to S3
-      for (let i = 0; i < totalChunks; i++) {
-        if (abortRef.current) {
-          setUploadState('idle');
-          return;
-        }
-
-        const start = i * MULTIPART_CHUNK_SIZE;
-        const end = Math.min(start + MULTIPART_CHUNK_SIZE, file.size);
-        const chunk = file.slice(start, end);
-        const partNumber = i + 1; // S3 parts are 1-indexed
-
-        // A. Get presigned URL for this part from our server
-        const signRes = await fetch('/api/upload/multipart/sign-part', {
+      // 2. Batch-sign presigned URLs for all parts in one round trip
+      const signParts = async (partNumbers) => {
+        const res = await fetch('/api/upload/multipart/sign-parts', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${token}`
           },
-          body: JSON.stringify({
-            uploadId,
-            key,
-            partNumber
-          })
+          body: JSON.stringify({ uploadId, key, partNumbers })
         });
-        const signData = await signRes.json();
-        if (!signRes.ok) throw new Error(signData.error || `Failed to sign part ${partNumber}`);
-        const presignedUrl = signData.url;
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to sign upload parts');
+        return data.urls;
+      };
 
-        // B. Upload part directly to S3
-        const uploadResponse = await fetch(presignedUrl, {
-          method: 'PUT',
-          body: chunk
-        });
-        if (!uploadResponse.ok) {
-          throw new Error(`Failed to upload part ${partNumber} to S3`);
+      const allPartNumbers = Array.from({ length: totalChunks }, (_, i) => i + 1);
+      const partUrls = await signParts(allPartNumbers);
+
+      // 3. Upload parts in parallel directly to S3, with per-part retry
+      const completedParts = [];
+      let uploadedTotal = 0;
+      let nextIndex = 0;
+
+      const uploadPart = async (partNumber, attempt = 0) => {
+        const start = (partNumber - 1) * MULTIPART_CHUNK_SIZE;
+        const end = Math.min(start + MULTIPART_CHUNK_SIZE, file.size);
+        const chunk = file.slice(start, end);
+        try {
+          const uploadResponse = await fetch(partUrls[partNumber], {
+            method: 'PUT',
+            body: chunk
+          });
+          if (!uploadResponse.ok) {
+            throw new Error(`Failed to upload part ${partNumber} to S3 (${uploadResponse.status})`);
+          }
+          const eTag = uploadResponse.headers.get('ETag');
+          if (!eTag) {
+            throw new Error(`S3 response missing ETag header for part ${partNumber}`);
+          }
+          return { PartNumber: partNumber, ETag: eTag.replace(/"/g, ''), size: end - start };
+        } catch (err) {
+          if (attempt < PART_MAX_RETRIES && !abortRef.current) {
+            // Re-sign this part (URL may have expired) and retry with backoff
+            await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+            try {
+              const fresh = await signParts([partNumber]);
+              partUrls[partNumber] = fresh[partNumber];
+            } catch {}
+            return uploadPart(partNumber, attempt + 1);
+          }
+          throw err;
         }
+      };
 
-        // C. Read ETag header returned by S3
-        const eTag = uploadResponse.headers.get('ETag');
-        if (!eTag) {
-          throw new Error(`S3 response missing ETag header for part ${partNumber}`);
+      const worker = async () => {
+        while (true) {
+          if (abortRef.current) return;
+          const i = nextIndex++;
+          if (i >= totalChunks) return;
+          const part = await uploadPart(i + 1);
+          completedParts.push({ PartNumber: part.PartNumber, ETag: part.ETag });
+
+          uploadedTotal += part.size;
+          setUploadedBytes(uploadedTotal);
+          setProgress(Math.round((uploadedTotal / file.size) * 100));
+          const elapsed = (Date.now() - startTimeRef.current) / 1000;
+          const bytesPerSec = elapsed > 0 ? uploadedTotal / elapsed : 0;
+          setSpeed(bytesPerSec);
+          setEta(bytesPerSec > 0 ? (file.size - uploadedTotal) / bytesPerSec : null);
         }
+      };
 
-        completedParts.push({
-          PartNumber: partNumber,
-          ETag: eTag.replace(/"/g, '') // strip quotes if any
-        });
+      await Promise.all(
+        Array.from({ length: Math.min(UPLOAD_CONCURRENCY, totalChunks) }, worker)
+      );
 
-        const sentBytes = end;
-        setUploadedBytes(sentBytes);
-        const pct = Math.round((sentBytes / file.size) * 100);
-        setProgress(pct);
-
-        const elapsed = (Date.now() - startTimeRef.current) / 1000;
-        const bytesPerSec = elapsed > 0 ? sentBytes / elapsed : 0;
-        setSpeed(bytesPerSec);
-        const remaining = file.size - sentBytes;
-        setEta(bytesPerSec > 0 ? remaining / bytesPerSec : null);
+      if (abortRef.current) {
+        setUploadState('idle');
+        return;
       }
 
-      // 3. Complete upload
+      // S3 requires parts listed in ascending order
+      completedParts.sort((a, b) => a.PartNumber - b.PartNumber);
+
+      // 4. Complete upload
       setUploadState('assembling');
       const payload = {
         uploadId,
@@ -408,7 +431,7 @@ export default function UploadPage() {
                   <div className="upload-file-details">
                     <div className="upload-file-name">{file.name}</div>
                     <div className="upload-file-meta">
-                      {formatBytes(file.size)} • {Math.ceil(file.size / MULTIPART_CHUNK_SIZE)} parts × 15MB
+                      {formatBytes(file.size)} • {Math.ceil(file.size / MULTIPART_CHUNK_SIZE)} parts × 100MB
                     </div>
                   </div>
                   <button
@@ -560,7 +583,7 @@ export default function UploadPage() {
                 <span className="upload-feature-icon">📦</span>
                 <div>
                   <strong>S3 Direct Multipart</strong>
-                  <span>Files uploaded directly to S3 in 15MB parts for security and speed</span>
+                  <span>Files uploaded directly to S3 in 100MB parts, 4 in parallel — never through the server</span>
                 </div>
               </div>
               <div className="upload-feature">
