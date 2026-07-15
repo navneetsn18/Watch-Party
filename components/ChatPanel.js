@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect } from 'react';
+import { Smile, Send, Zap, ShieldCheck } from 'lucide-react';
 import { VerifiedBadge } from './VerifiedBadge';
 
 const EMOJI_DATA = {
@@ -84,24 +85,29 @@ export default function ChatPanel({
     }
   }
 
-  function escapeHtml(str) {
-    return String(str)
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;');
-  }
-
   return (
-    <>
-      {/* Messages */}
-      <div className="chat-messages" ref={messagesRef}>
+    <div className="flex-1 flex flex-col min-h-0 overflow-hidden bg-zinc-950">
+      {/* Scrollable messages area */}
+      <div 
+        ref={messagesRef}
+        className="flex-1 overflow-y-auto px-4 py-4 flex flex-col gap-3 scrollbar"
+      >
+        {messages.length === 0 && (
+          <div className="text-center my-auto py-8 text-zinc-600 text-xs select-none">
+            No messages yet. Send a message to start chatting!
+          </div>
+        )}
+        
         {messages.map((msg, i) => {
           if (msg.isSystem) {
             const cleanMessage = msg.message && typeof msg.message === 'string'
               ? msg.message.replace(/ \[VERIFIED\]/g, '')
               : msg.message;
             return (
-              <div key={i} className="chat-msg system">
+              <div 
+                key={i} 
+                className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest text-center py-1 select-none leading-relaxed"
+              >
                 {cleanMessage}
               </div>
             );
@@ -110,98 +116,140 @@ export default function ChatPanel({
           const hasVerified = senderStr.includes(' [VERIFIED]');
           const cleanSender = hasVerified ? senderStr.replace(' [VERIFIED]', '') : senderStr;
           const isSelf = msg.sender === username;
+
           return (
-            <div key={i} className={`chat-msg ${isSelf ? 'self' : 'other'}`}>
-              <span className="chat-sender" style={{ display: 'inline-flex', alignItems: 'center' }}>
-                {cleanSender}
-                {hasVerified && <VerifiedBadge size={14} />}
-              </span>
-              {msg.message}
+            <div 
+              key={i} 
+              className={`flex flex-col gap-1 w-full max-w-[85%] ${
+                isSelf ? 'self-end items-end' : 'self-start items-start'
+              }`}
+            >
+              {/* Sender Name */}
+              {!isSelf && (
+                <span className="text-[10px] font-bold text-zinc-500 flex items-center gap-1 ml-1">
+                  {cleanSender}
+                  {hasVerified && <VerifiedBadge size={10} />}
+                </span>
+              )}
+              
+              {/* Message Bubble */}
+              <div 
+                className={`px-3.5 py-2 text-xs leading-relaxed ${
+                  isSelf 
+                    ? 'bg-violet-600 text-white rounded-2xl rounded-tr-none shadow shadow-violet-950/20' 
+                    : 'bg-zinc-900 text-zinc-200 border border-zinc-800 rounded-2xl rounded-tl-none shadow shadow-black/20'
+                }`}
+              >
+                {msg.message}
+              </div>
             </div>
           );
         })}
       </div>
 
-      {/* Chat footer */}
-      <div className="chat-footer">
-        {/* Quick reactions */}
-        <div className="reaction-bar">
-          {QUICK_REACTIONS.map((em) => (
-            <span
-              key={em}
-              className="reaction-btn"
-              onClick={() => onSendReaction(em)}
-            >
-              {em}
-            </span>
-          ))}
+      {/* Input panel & reaction bar footer */}
+      <div className="p-3 bg-zinc-950 border-t border-zinc-900 flex flex-col gap-2 flex-shrink-0 relative">
+        {/* Floating Emoji Selector */}
+        <div ref={emojiWrapRef} className="relative">
+          {/* Quick reactions bar */}
+          <div className="flex items-center justify-between gap-1 select-none">
+            <div className="flex items-center gap-1">
+              {QUICK_REACTIONS.map((em) => (
+                <button
+                  key={em}
+                  onClick={() => onSendReaction(em)}
+                  className="w-7 h-7 text-sm rounded-lg hover:bg-zinc-900 flex items-center justify-center transition-colors cursor-pointer active:scale-90"
+                >
+                  {em}
+                </button>
+              ))}
+            </div>
 
-          <div className="emoji-picker-wrap" ref={emojiWrapRef}>
+            {/* Custom Emoji grid trigger */}
             <button
-              className="emoji-toggle-btn"
               onClick={(e) => {
                 e.stopPropagation();
                 setEmojiOpen(!emojiOpen);
               }}
+              className="w-7 h-7 rounded-lg hover:bg-zinc-900 border border-transparent hover:border-zinc-800 text-zinc-400 hover:text-white flex items-center justify-center cursor-pointer transition-all"
+              title="Emoji Picker"
             >
-              😊 ＋
+              <Smile className="w-4 h-4" />
             </button>
-            <div className={`emoji-panel ${emojiOpen ? 'open' : ''}`}>
-              {/* Mode tabs */}
-              <div className="emoji-mode-tabs">
+          </div>
+
+          {/* Emoji panel body */}
+          {emojiOpen && (
+            <div className="absolute bottom-full right-0 mb-3 w-72 p-3 bg-zinc-950 border border-zinc-800 rounded-2xl shadow-2xl z-50 flex flex-col gap-3">
+              {/* Toggles */}
+              <div className="grid grid-cols-2 p-0.5 bg-zinc-900 rounded-lg border border-zinc-800">
                 <button
-                  className={`emoji-mode-tab ${emojiMode === 'insert' ? 'active' : ''}`}
                   onClick={() => setEmojiMode('insert')}
+                  className={`py-1 text-[10px] font-bold rounded-md transition-colors cursor-pointer ${
+                    emojiMode === 'insert' ? 'bg-zinc-800 text-white' : 'text-zinc-500'
+                  }`}
                 >
-                  💬 Insert in Chat
+                  💬 In Chat
                 </button>
                 <button
-                  className={`emoji-mode-tab ${emojiMode === 'react' ? 'active' : ''}`}
                   onClick={() => setEmojiMode('react')}
+                  className={`py-1 text-[10px] font-bold rounded-md transition-colors cursor-pointer ${
+                    emojiMode === 'react' ? 'bg-zinc-800 text-white' : 'text-zinc-500'
+                  }`}
                 >
-                  🎉 Send as Reaction
+                  🎉 Reaction
                 </button>
               </div>
-              {Object.entries(EMOJI_DATA).map(([category, emojis]) => (
-                <div key={category}>
-                  <div className="emoji-cat-label">{category}</div>
-                  <div className="emoji-grid">
-                    {emojis.map((em) => (
-                      <span
-                        key={em}
-                        className="emoji-item"
-                        onClick={() => handleEmojiClick(em)}
-                      >
-                        {em}
-                      </span>
-                    ))}
+
+              {/* Emoji lists */}
+              <div className="max-h-48 overflow-y-auto flex flex-col gap-3 scrollbar pr-1">
+                {Object.entries(EMOJI_DATA).map(([category, emojis]) => (
+                  <div key={category} className="flex flex-col gap-1">
+                    <span className="text-[9px] uppercase font-black text-zinc-500 tracking-wider ml-1 select-none">
+                      {category}
+                    </span>
+                    <div className="grid grid-cols-8 gap-1">
+                      {emojis.map((em) => (
+                        <span
+                          key={em}
+                          onClick={() => handleEmojiClick(em)}
+                          className="text-lg hover:bg-zinc-900 rounded-lg flex items-center justify-center p-1 cursor-pointer transition-colors active:scale-90"
+                        >
+                          {em}
+                        </span>
+                      ))}
+                    </div>
                   </div>
-                </div>
-              ))}
+                ))}
+              </div>
             </div>
-          </div>
+          )}
         </div>
 
-        {/* Input row */}
-        <div className="chat-input-row">
+        {/* Chat Text Input field */}
+        <div className="flex gap-2 items-end">
           <textarea
             ref={inputRef}
-            className="chat-textarea"
-            placeholder="Say something…"
-            maxLength={500}
             rows={1}
+            maxLength={500}
             value={inputValue}
+            onKeyDown={handleKeyDown}
             onChange={(e) => {
               setInputValue(e.target.value);
               autoResize(e.target);
             }}
-            onKeyDown={handleKeyDown}
+            placeholder="Say something..."
+            className="flex-1 px-3 py-2.5 bg-zinc-950 border border-zinc-900 focus:outline-none focus:border-zinc-800 text-xs text-zinc-100 placeholder-zinc-600 rounded-xl resize-none max-h-20 scrollbar transition-colors"
           />
-          <button className="chat-send-btn" onClick={sendChat}>
-            ➤
+          <button 
+            onClick={sendChat}
+            className="p-2.5 rounded-xl bg-violet-600 hover:bg-violet-500 text-white flex items-center justify-center shadow-lg shadow-violet-900/10 active:scale-95 transition-all cursor-pointer flex-shrink-0"
+            title="Send Message"
+          >
+            <Send className="w-3.5 h-3.5" />
           </button>
         </div>
       </div>
-    </>
+    </div>
   );
 }

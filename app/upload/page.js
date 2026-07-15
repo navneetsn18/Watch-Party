@@ -2,10 +2,11 @@
 
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import { ArrowLeft, UploadCloud, Video, AlertCircle, CheckCircle, RefreshCw, Layers, Shield, Cpu, RefreshCw as SpinnerIcon, Image as ImageIcon, Link2, Loader2 } from 'lucide-react';
 import { getSocket } from '../../lib/socket';
 import { supabase } from '../../lib/supabase';
 
-const MULTIPART_CHUNK_SIZE = 100 * 1024 * 1024; // 100MB parts — 6GB = 60 parts instead of 410
+const MULTIPART_CHUNK_SIZE = 100 * 1024 * 1024; // 100MB parts
 const UPLOAD_CONCURRENCY = 4; // parallel part uploads
 const PART_MAX_RETRIES = 3;
 const ALLOWED_TYPES = ['video/mp4', 'video/webm', 'video/ogg', 'video/quicktime', 'video/x-matroska', 'video/avi', 'video/x-msvideo'];
@@ -235,10 +236,9 @@ export default function UploadPage() {
       const allPartNumbers = Array.from({ length: totalChunks }, (_, i) => i + 1);
       const partUrls = await signParts(allPartNumbers);
 
-      // 3. Upload parts in parallel directly to S3, with per-part retry.
-      // XHR (not fetch) so we get byte-level upload progress and real abort.
+      // 3. Upload parts in parallel directly to S3
       const completedParts = [];
-      const partLoaded = {}; // partNumber -> bytes sent for in-flight parts
+      const partLoaded = {}; 
       let completedBytes = 0;
       let nextIndex = 0;
       let lastUiUpdate = 0;
@@ -298,7 +298,6 @@ export default function UploadPage() {
         } catch (err) {
           if (attempt < PART_MAX_RETRIES && !abortRef.current) {
             partLoaded[partNumber] = 0;
-            // Re-sign this part (URL may have expired) and retry with backoff
             await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
             try {
               const fresh = await signParts([partNumber]);
@@ -333,7 +332,6 @@ export default function UploadPage() {
         return;
       }
 
-      // S3 requires parts listed in ascending order
       completedParts.sort((a, b) => a.PartNumber - b.PartNumber);
 
       // 4. Complete upload
@@ -381,7 +379,6 @@ export default function UploadPage() {
 
   function handleCancel() {
     abortRef.current = true;
-    // Kill in-flight part uploads immediately instead of letting 100MB PUTs drain
     activeXhrsRef.current.forEach(xhr => { try { xhr.abort(); } catch {} });
     activeXhrsRef.current.clear();
     setUploadState('idle');
@@ -414,50 +411,61 @@ export default function UploadPage() {
   const isProcessing = uploadState === 'assembling' || uploadState === 'transcoding' || uploadState === 's3_uploading';
   const isComplete = uploadState === 'complete';
   const isError = uploadState === 'error';
+
   if (loading) {
     return (
-      <div className="upload-container">
-        <div className="upload-header" style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '300px' }}>
-          <div className="upload-title" style={{ textAlign: 'center' }}>
-            <div className="upload-icon">📤</div>
-            <h1>Upload Video</h1>
-            <p>Verifying permissions...</p>
-            <div className="spinner" style={{ margin: '20px auto' }} />
-          </div>
-        </div>
+      <div className="min-h-[85vh] w-full flex items-center justify-center bg-[#07070a]">
+        <Loader2 className="w-8 h-8 text-violet-500 animate-spin" />
       </div>
     );
   }
 
   return (
-    <div className="upload-container">
-      <div className="upload-header">
-        <button className="upload-back-btn" onClick={() => router.push('/')}>
-          ← Back to Lobby
+    <div className="max-w-3xl mx-auto px-6 py-12 bg-[#07070a] min-h-[90vh] flex flex-col gap-6">
+      {/* Header */}
+      <div className="flex flex-col gap-4 pb-6 border-b border-zinc-900 select-none">
+        <button 
+          onClick={() => router.push('/')}
+          className="flex items-center gap-1.5 text-xs font-semibold text-zinc-500 hover:text-zinc-400 cursor-pointer self-start transition-colors"
+        >
+          <ArrowLeft className="w-4 h-4" />
+          <span>Back to Lobby</span>
         </button>
-        <div className="upload-title">
-          <div className="upload-icon">📤</div>
-          <h1>Upload Video</h1>
-          <p>Upload your video files for Netflix-style HLS streaming</p>
+        <div>
+          <h1 className="text-3xl font-black text-white flex items-center gap-2.5 tracking-tight">
+            <UploadCloud className="w-7 h-7 text-violet-400" />
+            Upload Video
+          </h1>
+          <p className="text-sm text-zinc-400 mt-1.5">
+            Deliver your clips directly to S3 and initiate serverless HLS transcoding
+          </p>
         </div>
       </div>
 
-      <div className="upload-card">
-        {/* Idle / File Selection */}
+      {/* Main Upload Box */}
+      <div className="bg-zinc-900/35 border border-zinc-800/60 p-8 rounded-3xl backdrop-blur-md shadow-2xl">
+        {/* Idle Selection Form */}
         {!isUploading && !isProcessing && !isComplete && (
-          <>
+          <div className="flex flex-col gap-6">
+            {/* Drag Zone */}
             <div
-              className={`upload-dropzone ${dragOver ? 'dragover' : ''} ${file ? 'has-file' : ''}`}
               onDrop={handleDrop}
               onDragOver={handleDragOver}
               onDragLeave={handleDragLeave}
               onClick={() => fileInputRef.current?.click()}
+              className={`w-full border-2 border-dashed rounded-2xl p-8 flex flex-col items-center justify-center text-center cursor-pointer transition-all ${
+                dragOver 
+                  ? 'border-violet-500 bg-violet-950/10' 
+                  : file 
+                    ? 'border-zinc-700 bg-zinc-950/20' 
+                    : 'border-zinc-800 hover:border-zinc-700 bg-zinc-950/30'
+              }`}
             >
               <input
                 ref={fileInputRef}
                 type="file"
                 accept="video/*"
-                style={{ display: 'none' }}
+                className="hidden"
                 onChange={(e) => {
                   const f = e.target.files?.[0];
                   if (f) handleFileSelect(f);
@@ -465,49 +473,49 @@ export default function UploadPage() {
               />
 
               {file ? (
-                <div className="upload-file-info">
-                  <div className="upload-file-icon">🎬</div>
-                  <div className="upload-file-details">
-                    <div className="upload-file-name">{file.name}</div>
-                    <div className="upload-file-meta">
-                      {formatBytes(file.size)} • {Math.ceil(file.size / MULTIPART_CHUNK_SIZE)} parts × 100MB
-                    </div>
+                <div className="flex items-center gap-4 text-left w-full max-w-md bg-zinc-950 p-4 rounded-xl border border-zinc-800 relative group">
+                  <div className="p-3 bg-zinc-900 border border-zinc-800 rounded-lg text-violet-400 flex-shrink-0">
+                    <Video className="w-6 h-6" />
+                  </div>
+                  <div className="min-w-0 flex-1 flex flex-col">
+                    <span className="text-sm font-bold text-white truncate">{file.name}</span>
+                    <span className="text-[10px] text-zinc-500 font-mono mt-0.5">
+                      {formatBytes(file.size)} • {Math.ceil(file.size / MULTIPART_CHUNK_SIZE)} parts
+                    </span>
                   </div>
                   <button
-                    className="upload-file-remove"
                     onClick={(e) => {
                       e.stopPropagation();
                       handleReset();
                     }}
+                    className="p-1 rounded bg-zinc-900 border border-zinc-800 text-zinc-500 hover:text-white cursor-pointer transition-colors"
                   >
                     ✕
                   </button>
                 </div>
               ) : (
-                <>
-                  <div className="dropzone-icon">
-                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                      <path d="M12 16V4m0 0l-4 4m4-4l4 4" strokeLinecap="round" strokeLinejoin="round"/>
-                      <path d="M20 16v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2" strokeLinecap="round" strokeLinejoin="round"/>
-                    </svg>
+                <div className="flex flex-col items-center gap-2 select-none">
+                  <div className="p-4 bg-zinc-900 border border-zinc-800 rounded-2xl text-zinc-400 mb-2">
+                    <UploadCloud className="w-8 h-8" />
                   </div>
-                  <div className="dropzone-text">
-                    <strong>Drop a video here</strong> or click to browse
-                  </div>
-                  <div className="dropzone-hint">
-                    MP4, WebM, MKV, MOV, OGG, AVI (Max 6 GB)
-                  </div>
-                </>
+                  <span className="text-sm font-bold text-white">Drag and drop your file here</span>
+                  <span className="text-xs text-zinc-500">or click to browse local files</span>
+                  <span className="text-[10px] uppercase font-bold tracking-wider text-zinc-600 mt-4">
+                    MP4, WebM, MKV, MOV, AVI (Max 6 GB)
+                  </span>
+                </div>
               )}
             </div>
 
+            {/* Custom Settings (only visible when file is loaded) */}
             {file && (
-              <>
-                <div className="input-group" style={{ marginTop: '20px', marginBottom: '10px' }}>
-                  <label className="input-label">Video Title</label>
+              <div className="flex flex-col gap-5 pt-4 border-t border-zinc-900/60">
+                {/* Title */}
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-xs font-semibold text-zinc-400">Video Title</label>
                   <input
                     type="text"
-                    className="input-field"
+                    className="w-full px-4 py-2.5 rounded-xl bg-zinc-950 border border-zinc-800 text-zinc-200 focus:outline-none focus:border-violet-600 text-sm transition-all"
                     placeholder="Enter a custom title for this video"
                     value={displayName}
                     onChange={(e) => setDisplayName(e.target.value)}
@@ -516,35 +524,39 @@ export default function UploadPage() {
                   />
                 </div>
 
-                <div className="input-group" style={{ marginTop: '15px', marginBottom: '15px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <label className="input-label" style={{ fontWeight: 'bold', fontSize: '14px' }}>Video Thumbnail</label>
-                  <div style={{ display: 'flex', gap: '15px', marginBottom: '8px' }}>
-                    <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '14px' }}>
+                {/* Thumbnail Picker */}
+                <div className="flex flex-col gap-2.5">
+                  <label className="text-xs font-semibold text-zinc-400">Video Thumbnail</label>
+                  
+                  {/* Selector Radio tab */}
+                  <div className="flex gap-4 mb-2">
+                    <label className="flex items-center gap-2 text-xs font-medium text-zinc-400 cursor-pointer select-none">
                       <input
                         type="radio"
                         name="thumbnailType"
                         value="upload"
                         checked={thumbnailType === 'upload'}
                         onChange={() => setThumbnailType('upload')}
+                        className="w-[18px] h-[18px] text-violet-600 focus:ring-violet-600 cursor-pointer border-zinc-800 bg-zinc-950"
                       />
-                      Upload Image
+                      <span className="flex items-center gap-1"><UploadCloud className="w-3.5 h-3.5" /> Upload Image</span>
                     </label>
-                    <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontSize: '14px' }}>
+                    <label className="flex items-center gap-2 text-xs font-medium text-zinc-400 cursor-pointer select-none">
                       <input
                         type="radio"
                         name="thumbnailType"
                         value="url"
                         checked={thumbnailType === 'url'}
                         onChange={() => setThumbnailType('url')}
+                        className="w-[18px] h-[18px] text-violet-600 focus:ring-violet-600 cursor-pointer border-zinc-800 bg-zinc-950"
                       />
-                      Image URL
+                      <span className="flex items-center gap-1"><Link2 className="w-3.5 h-3.5" /> Image URL</span>
                     </label>
                   </div>
 
                   {thumbnailType === 'upload' ? (
-                    <div key="thumbnail-upload-wrapper" style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    <div className="flex flex-col gap-3">
                       <input
-                        key="thumbnail-file-input"
                         type="file"
                         accept="image/*"
                         onChange={(e) => {
@@ -559,196 +571,244 @@ export default function UploadPage() {
                             reader.readAsDataURL(imgFile);
                           }
                         }}
-                        style={{
-                          fontSize: '13px',
-                          padding: '6px',
-                          background: 'rgba(255,255,255,0.05)',
-                          border: '1px solid rgba(255,255,255,0.1)',
-                          borderRadius: '4px',
-                          color: '#fff',
-                          cursor: 'pointer'
-                        }}
+                        className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-zinc-300 text-xs cursor-pointer focus:outline-none"
                       />
                       {thumbnailData && (
-                        <div style={{ marginTop: '5px' }}>
-                          <span style={{ fontSize: '12px', color: 'var(--text-muted)', display: 'block', marginBottom: '4px' }}>Preview:</span>
+                        <div className="flex flex-col gap-1">
+                          <span className="text-[10px] font-bold text-zinc-500 uppercase">Preview:</span>
                           <img
                             src={thumbnailData}
-                            alt="Thumbnail Preview"
-                            style={{ maxWidth: '160px', height: '90px', objectFit: 'cover', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.2)' }}
+                            alt="Preview"
+                            className="max-w-[200px] aspect-video object-cover rounded-xl border border-zinc-800 shadow"
                           />
                         </div>
                       )}
                     </div>
                   ) : (
-                    <div key="thumbnail-url-wrapper" style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    <div className="flex flex-col gap-3">
                       <input
-                        key="thumbnail-url-input"
                         type="text"
-                        className="input-field"
+                        className="w-full px-4 py-2.5 rounded-xl bg-zinc-950 border border-zinc-800 text-zinc-200 focus:outline-none focus:border-violet-600 text-sm transition-all"
                         placeholder="https://example.com/thumbnail.jpg"
                         value={thumbnailUrl}
                         onChange={(e) => setThumbnailUrl(e.target.value)}
                       />
                       {thumbnailUrl && (
-                        <div style={{ marginTop: '5px' }}>
-                          <span style={{ fontSize: '12px', color: 'var(--text-muted)', display: 'block', marginBottom: '4px' }}>Preview:</span>
+                        <div className="flex flex-col gap-1">
+                          <span className="text-[10px] font-bold text-zinc-500 uppercase">Preview:</span>
                           <img
                             src={thumbnailUrl}
-                            alt="Thumbnail URL Preview"
+                            alt="Preview URL"
                             onError={(e) => { e.target.style.display = 'none'; }}
-                            style={{ maxWidth: '160px', height: '90px', objectFit: 'cover', borderRadius: '4px', border: '1px solid rgba(255,255,255,0.2)' }}
+                            className="max-w-[200px] aspect-video object-cover rounded-xl border border-zinc-800 shadow"
                           />
                         </div>
                       )}
                     </div>
                   )}
                 </div>
-              </>
+              </div>
             )}
 
             {errorMsg && (
-              <div className="upload-error">⚠️ {errorMsg}</div>
+              <div className="p-3 rounded-xl border bg-red-950/20 border-red-900/35 text-red-400 text-xs flex items-center gap-2">
+                <AlertCircle className="w-4 h-4" />
+                <span>{errorMsg}</span>
+              </div>
             )}
 
             {file && (
-              <button className="btn btn-primary upload-start-btn" onClick={startUpload}>
-                🚀 Start Upload
+              <button 
+                onClick={startUpload}
+                className="w-full py-3.5 rounded-xl bg-violet-600 hover:bg-violet-600 text-white font-semibold text-sm transition-all flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-violet-900/20 active:scale-[0.98]"
+              >
+                <span>Start Uploading</span>
               </button>
             )}
 
-            <div className="upload-features">
-              <div className="upload-feature">
-                <span className="upload-feature-icon">📦</span>
-                <div>
-                  <strong>S3 Direct Multipart</strong>
-                  <span>Files uploaded directly to S3 in 100MB parts, 4 in parallel — never through the server</span>
+            {/* Feature lists */}
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-4 pt-6 border-t border-zinc-900/60">
+              <div className="p-4 rounded-2xl bg-zinc-950/50 border border-zinc-900 flex items-start gap-3">
+                <div className="p-2 bg-zinc-900 rounded-lg text-violet-400 flex-shrink-0 mt-0.5">
+                  <Layers className="w-4 h-4" />
+                </div>
+                <div className="flex flex-col">
+                  <span className="text-xs font-bold text-white">Direct S3 Multi-part</span>
+                  <span className="text-[10px] text-zinc-500 mt-1 leading-relaxed">
+                    Uploads bypass intermediate servers, shipping 100MB chunks in parallel.
+                  </span>
                 </div>
               </div>
-              <div className="upload-feature">
-                <span className="upload-feature-icon">🎬</span>
-                <div>
-                  <strong>AWS MediaConvert</strong>
-                  <span>Serverless transcoding handles massive files without loading EC2</span>
+
+              <div className="p-4 rounded-2xl bg-zinc-950/50 border border-zinc-900 flex items-start gap-3">
+                <div className="p-2 bg-zinc-900 rounded-lg text-violet-400 flex-shrink-0 mt-0.5">
+                  <Cpu className="w-4 h-4" />
+                </div>
+                <div className="flex flex-col">
+                  <span className="text-xs font-bold text-white">AWS MediaConvert</span>
+                  <span className="text-[10px] text-zinc-500 mt-1 leading-relaxed">
+                    Transcodes video serverlessly to handle HLS adaptive bitrates automatically.
+                  </span>
                 </div>
               </div>
-              <div className="upload-feature">
-                <span className="upload-feature-icon">⚡</span>
-                <div>
-                  <strong>HLS Stream Delivery</strong>
-                  <span>Auto-chunked into 4-second segments for smooth watch parties</span>
+
+              <div className="p-4 rounded-2xl bg-zinc-950/50 border border-zinc-900 flex items-start gap-3">
+                <div className="p-2 bg-zinc-900 rounded-lg text-violet-400 flex-shrink-0 mt-0.5">
+                  <CheckCircle className="w-4 h-4" />
+                </div>
+                <div className="flex flex-col">
+                  <span className="text-xs font-bold text-white">HLS Segments</span>
+                  <span className="text-[10px] text-zinc-500 mt-1 leading-relaxed">
+                    Splits videos into 4-second playlist clips for robust synchronized watch party lobbies.
+                  </span>
                 </div>
               </div>
             </div>
-          </>
+          </div>
         )}
 
-        {/* Uploading */}
+        {/* Uploading progress states */}
         {isUploading && (
-          <div className="upload-progress-section">
-            <div className="upload-progress-header">
-              <div className="upload-progress-icon uploading">📤</div>
-              <div>
-                <div className="upload-progress-title">Uploading...</div>
-                <div className="upload-progress-subtitle">{file?.name}</div>
+          <div className="flex flex-col gap-6 py-6 text-center sm:text-left select-none">
+            <div className="flex flex-col sm:flex-row items-center gap-4">
+              <div className="w-12 h-12 bg-violet-950/30 border border-violet-900/40 text-violet-400 rounded-2xl flex items-center justify-center flex-shrink-0">
+                <UploadCloud className="w-6 h-6 animate-pulse" />
+              </div>
+              <div className="min-w-0 flex-1 flex flex-col">
+                <span className="text-lg font-bold text-white leading-snug">Uploading Video Parts...</span>
+                <span className="text-xs text-zinc-500 mt-0.5 truncate">{file?.name}</span>
               </div>
             </div>
 
-            <div className="upload-progress-bar-wrap">
-              <div className="upload-progress-bar">
-                <div
-                  className="upload-progress-fill"
-                  style={{ width: progress + '%' }}
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center justify-between text-xs font-semibold text-zinc-400 px-1">
+                <span>Upload Progress</span>
+                <span className="text-violet-400 font-mono">{progress}%</span>
+              </div>
+              <div className="w-full h-2.5 bg-zinc-950 rounded-full overflow-hidden border border-zinc-900">
+                <motion.div
+                  className="h-full bg-gradient-to-r from-violet-600 to-indigo-600 rounded-full"
+                  style={{ width: `${progress}%` }}
+                  transition={{ ease: 'easeOut', duration: 0.2 }}
                 />
               </div>
-              <span className="upload-progress-pct">{progress}%</span>
             </div>
 
-            <div className="upload-progress-stats">
-              <span>{formatBytes(uploadedBytes)} / {formatBytes(file?.size || 0)}</span>
-              <span>{formatBytes(speed)}/s</span>
-              <span>ETA: {eta !== null ? formatDuration(eta) : '—'}</span>
+            <div className="grid grid-cols-3 gap-4 p-4 rounded-2xl bg-zinc-950 border border-zinc-900 text-center">
+              <div className="flex flex-col">
+                <span className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider">Transferred</span>
+                <span className="text-sm font-bold text-zinc-200 mt-1 font-mono">{formatBytes(uploadedBytes)}</span>
+              </div>
+              <div className="flex flex-col">
+                <span className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider">Speed</span>
+                <span className="text-sm font-bold text-zinc-200 mt-1 font-mono">{formatBytes(speed)}/s</span>
+              </div>
+              <div className="flex flex-col">
+                <span className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider">ETA</span>
+                <span className="text-sm font-bold text-zinc-200 mt-1 font-mono">
+                  {eta !== null ? formatDuration(eta) : 'estimating...'}
+                </span>
+              </div>
             </div>
 
-            <button className="btn btn-secondary upload-cancel-btn" onClick={handleCancel}>
-              Cancel
+            <button 
+              onClick={handleCancel}
+              className="w-full py-3 rounded-xl bg-zinc-950 hover:bg-zinc-900 border border-zinc-800 text-zinc-400 hover:text-white font-semibold text-xs transition-colors cursor-pointer"
+            >
+              Cancel Upload
             </button>
           </div>
         )}
 
-        {/* Processing (assembling / transcoding) */}
+        {/* Processing states (assembling / transcoding) */}
         {isProcessing && (
-          <div className="upload-progress-section">
-            <div className="upload-progress-header">
-              <div className="upload-progress-icon processing">
-                <div className="spinner" />
+          <div className="flex flex-col gap-6 py-6 select-none">
+            <div className="flex items-center gap-4">
+              <div className="w-12 h-12 rounded-2xl bg-zinc-950 border border-zinc-900 flex items-center justify-center flex-shrink-0">
+                <SpinnerIcon className="w-5 h-5 text-violet-500 animate-spin" />
               </div>
-              <div>
-                <div className="upload-progress-title">
-                  {uploadState === 'assembling' && 'Finalizing upload on S3...'}
-                  {uploadState === 'transcoding' && 'Converting to HLS...'}
-                </div>
-                <div className="upload-progress-subtitle">
-                  {uploadState === 'assembling' && 'Instructing AWS S3 to assemble the uploaded parts'}
-                  {uploadState === 'transcoding' && 'AWS Elemental MediaConvert is splitting into streaming segments'}
-                </div>
+              <div className="flex-1 flex flex-col min-w-0">
+                <span className="text-base font-bold text-white">
+                  {uploadState === 'assembling' && 'Assembling multipart chunks...'}
+                  {uploadState === 'transcoding' && 'Converting to HLS streams...'}
+                </span>
+                <span className="text-xs text-zinc-500 mt-1 leading-snug">
+                  {uploadState === 'assembling' && 'Instructing AWS S3 to stitch the chunks together.'}
+                  {uploadState === 'transcoding' && 'AWS MediaConvert is generating adaptive bitrate playlist playlists.'}
+                </span>
               </div>
             </div>
 
             {uploadState === 'transcoding' && (
-              <div className="upload-transcode-info" style={{ marginTop: '15px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', width: '100%' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                  <div className="upload-transcode-pulse" />
-                  <span>AWS MediaConvert Transcoding: <strong>{jobPercentComplete}%</strong> complete</span>
+              <div className="flex flex-col gap-3 p-5 rounded-2xl bg-zinc-950 border border-zinc-900 text-center">
+                <div className="flex items-center justify-between text-xs font-semibold text-zinc-400">
+                  <span>Transcode Completion</span>
+                  <span className="text-emerald-400 font-mono">{jobPercentComplete}%</span>
                 </div>
-                <div className="upload-progress-bar-wrap" style={{ width: '100%', maxWidth: '300px', marginTop: '5px' }}>
-                  <div className="upload-progress-bar" style={{ height: '8px', background: 'rgba(255,255,255,0.1)', borderRadius: '4px', overflow: 'hidden' }}>
-                    <div
-                      className="upload-progress-fill"
-                      style={{ width: `${jobPercentComplete}%`, height: '100%', background: 'linear-gradient(90deg, #10b981, #34d399)', transition: 'width 0.3s ease' }}
-                    />
-                  </div>
+                <div className="w-full h-2 bg-zinc-900 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-gradient-to-r from-emerald-500 to-teal-500 transition-all duration-300"
+                    style={{ width: `${jobPercentComplete}%` }}
+                  />
                 </div>
               </div>
             )}
 
-            <div className="upload-processing-note" style={{ marginTop: '15px' }}>
-              This may take a few minutes for large files. You can leave this page — processing continues in the background.
+            <div className="p-4 rounded-xl bg-zinc-950 border border-zinc-900 text-[11px] text-zinc-500 text-center leading-relaxed">
+              This process runs serverlessly in the cloud. You can safely exit this screen — your video progress will continue in the background.
             </div>
           </div>
         )}
 
-        {/* Complete */}
+        {/* Completed state */}
         {isComplete && (
-          <div className="upload-complete-section">
-            <div className="upload-complete-icon">✅</div>
-            <div className="upload-complete-title">Upload Complete!</div>
-            <div className="upload-complete-subtitle">
-              {(() => {
-                const extension = file?.name ? file.name.substring(file.name.lastIndexOf('.')).toLowerCase() : '.mp4';
-                const base = displayName.trim() || (file?.name ? file.name.replace(/\.[^/.]+$/, "") : 'Video');
-                return base.endsWith(extension) ? base : `${base}${extension}`;
-              })()} is ready for Netflix-style streaming
+          <div className="flex flex-col items-center text-center gap-5 py-6">
+            <div className="w-16 h-16 rounded-3xl bg-emerald-950/20 border border-emerald-900/35 text-emerald-400 flex items-center justify-center text-2xl shadow-xl shadow-emerald-950/10">
+              ✓
+            </div>
+            <div className="flex flex-col gap-1">
+              <h2 className="text-xl font-black text-white tracking-tight">Upload Complete!</h2>
+              <p className="text-xs text-zinc-500 max-w-[280px] leading-relaxed mx-auto">
+                {(() => {
+                  const extension = file?.name ? file.name.substring(file.name.lastIndexOf('.')).toLowerCase() : '.mp4';
+                  const base = displayName.trim() || (file?.name ? file.name.replace(/\.[^/.]+$/, "") : 'Video');
+                  return base.endsWith(extension) ? base : `${base}${extension}`;
+                })()} is fully processed and ready for watch parties!
+              </p>
             </div>
 
-            <div className="upload-complete-actions">
-              <button className="btn btn-primary" onClick={() => router.push('/')}>
-                🎬 Go to Watch Party
+            <div className="flex gap-3 w-full max-w-sm mt-4">
+              <button 
+                onClick={() => router.push('/')}
+                className="flex-1 py-3 rounded-xl bg-violet-600 hover:bg-violet-600 active:scale-98 text-white font-semibold text-xs cursor-pointer shadow-lg shadow-violet-900/15 transition-all"
+              >
+                Go to Lobby
               </button>
-              <button className="btn btn-secondary" onClick={handleReset}>
-                📤 Upload Another
+              <button 
+                onClick={handleReset}
+                className="flex-1 py-3 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 hover:text-white font-semibold text-xs cursor-pointer transition-colors active:scale-98"
+              >
+                Upload Another
               </button>
             </div>
           </div>
         )}
 
-        {/* Error (when not in idle state) */}
+        {/* Error State */}
         {isError && (
-          <div className="upload-error-section">
-            <div className="upload-error-icon">❌</div>
-            <div className="upload-error-title">Upload Failed</div>
-            <div className="upload-error-msg">{errorMsg}</div>
-            <button className="btn btn-secondary" onClick={handleReset}>
+          <div className="flex flex-col items-center text-center gap-5 py-6">
+            <div className="w-16 h-16 rounded-3xl bg-red-950/20 border border-red-900/35 text-red-400 flex items-center justify-center text-2xl shadow-xl shadow-red-950/10">
+              ✕
+            </div>
+            <div className="flex flex-col gap-1.5 px-4">
+              <h2 className="text-xl font-black text-white tracking-tight">Upload Failed</h2>
+              <p className="text-xs text-red-400 font-medium leading-relaxed max-w-[320px] mx-auto">{errorMsg}</p>
+            </div>
+            
+            <button 
+              onClick={handleReset}
+              className="mt-4 px-6 py-2.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 hover:text-white font-semibold text-xs cursor-pointer transition-colors"
+            >
               Try Again
             </button>
           </div>

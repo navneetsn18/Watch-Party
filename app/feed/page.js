@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import { Compass, Play, Plus, MapPin, Eye, Lock, Globe, Loader2, Sparkles } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { getFlagEmoji } from '../../components/NavBar';
 import { VerifiedBadge } from '../../components/VerifiedBadge';
@@ -36,7 +37,7 @@ export default function FeedPage() {
           setProfile(currentProfile);
         }
 
-        // Fetch visible videos from Express API using auth header
+        // Fetch public videos
         const res = await fetch('/api/videos', {
           headers: {
             'Authorization': `Bearer ${token}`
@@ -62,117 +63,177 @@ export default function FeedPage() {
 
   if (loading) {
     return (
-      <div className="feed-container">
-        <div className="lobby-logo" style={{ textAlign: 'center', marginTop: '60px' }}>
-          <div className="logo-icon">🏠</div>
-          <h1>Feed</h1>
-          <p>Loading your feed...</p>
-          <div className="spinner" style={{ margin: '20px auto' }} />
+      <div className="max-w-7xl mx-auto px-6 py-12 bg-[#07070a] min-h-[90vh]">
+        <div className="flex flex-col gap-2 mb-10">
+          <div className="h-8 w-48 bg-zinc-900 animate-pulse rounded-lg" />
+          <div className="h-4 w-72 bg-zinc-900/60 animate-pulse rounded-md" />
+        </div>
+        
+        {/* Skeleton Grid */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+          {[...Array(8)].map((_, i) => (
+            <div key={i} className="rounded-2xl border border-zinc-800 bg-zinc-900/10 p-4 flex flex-col gap-3">
+              <div className="aspect-video w-full bg-zinc-900 animate-pulse rounded-xl" />
+              <div className="flex gap-3">
+                <div className="w-9 h-9 bg-zinc-900 animate-pulse rounded-full" />
+                <div className="flex-1 flex flex-col gap-1.5">
+                  <div className="h-4 bg-zinc-900 animate-pulse rounded w-3/4" />
+                  <div className="h-3 bg-zinc-900/60 animate-pulse rounded w-1/2" />
+                </div>
+              </div>
+            </div>
+          ))}
         </div>
       </div>
     );
   }
 
   return (
-    <div className="feed-container">
-      <div className="feed-header">
-        <div className="feed-logo-box">
-          <span className="feed-icon">🎬</span>
-          <h2>Explore Feed</h2>
-          <p>Discover public uploads and watch videos in real-time sync with friends</p>
+    <div className="max-w-7xl mx-auto px-6 py-12 bg-[#07070a] min-h-[90vh]">
+      {/* Header Area */}
+      <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 mb-10 pb-6 border-b border-zinc-900">
+        <div>
+          <h1 className="text-3xl font-black text-white flex items-center gap-2 tracking-tight">
+            <Compass className="w-7 h-7 text-violet-400" />
+            Explore Feed
+          </h1>
+          <p className="text-sm text-zinc-400 mt-1.5">
+            Discover public uploads and start real-time synchronized video parties with friends
+          </p>
         </div>
+
+        {/* Upload Action on Right */}
+        <button
+          onClick={() => router.push('/upload')}
+          className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold bg-zinc-900 border border-zinc-800 hover:bg-zinc-800 text-white cursor-pointer active:scale-95 transition-all shadow-md"
+        >
+          <Plus className="w-4 h-4 text-violet-400" />
+          <span>Upload New Video</span>
+        </button>
       </div>
 
-      <div className="feed-content">
-        {videos.length === 0 ? (
-          <div className="feed-card" style={{ padding: '40px', textAlign: 'center' }}>
-            <div style={{ fontSize: '48px', marginBottom: '20px' }}>📭</div>
-            <h3>Your Feed is Empty</h3>
-            <p style={{ color: 'var(--text-muted)', fontSize: '14px', maxWidth: '400px', margin: '10px auto' }}>
-              No public videos have been uploaded yet. Upload a video yourself or search and add friends to see their shared clips here!
-            </p>
-            <button className="btn btn-primary" onClick={() => router.push('/')} style={{ marginTop: '15px' }}>
-              📤 Upload Video
-            </button>
+      {/* Grid List */}
+      {videos.length === 0 ? (
+        <div className="max-w-md mx-auto my-16 p-8 rounded-3xl bg-zinc-900/20 border border-zinc-900 text-center flex flex-col items-center gap-4">
+          <div className="w-16 h-16 rounded-2xl bg-zinc-900 border border-zinc-800/80 flex items-center justify-center text-2xl text-zinc-500 shadow-inner">
+            📭
           </div>
-        ) : (
-          <div className="feed-grid">
-            {videos.map((video, idx) => (
-              <div key={video.key || idx} className="feed-item-card">
-                <div className="feed-item-preview">
-                  <div className="feed-preview-overlay">
-                    <button className="btn-play-pulse" onClick={() => startWatchParty(video.key)}>
-                      ▶
-                    </button>
+          <div>
+            <h3 className="text-base font-bold text-white">Your Feed is Empty</h3>
+            <p className="text-xs text-zinc-500 mt-1 max-w-[280px]">
+              No public videos have been uploaded yet. Upload a clip to kick off the watch feed!
+            </p>
+          </div>
+          <button 
+            onClick={() => router.push('/upload')}
+            className="px-5 py-2.5 rounded-xl bg-violet-600 hover:bg-violet-600 active:scale-98 text-white font-semibold text-xs cursor-pointer shadow-lg shadow-violet-900/10 transition-all"
+          >
+            Upload a Video
+          </button>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+          {videos.map((video, idx) => (
+            <div 
+              key={video.key || idx} 
+              className="group flex flex-col bg-zinc-900/20 border border-zinc-900 hover:border-zinc-800/80 rounded-2xl overflow-hidden hover:shadow-2xl hover:shadow-black/40 transition-all duration-300 relative"
+            >
+              {/* Thumbnail Container */}
+              <div className="aspect-video w-full bg-zinc-950 relative overflow-hidden flex items-center justify-center">
+                {/* Play Button Overlay */}
+                <div className="absolute inset-0 bg-black/60 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-all duration-300 z-10">
+                  <button 
+                    onClick={() => startWatchParty(video.key)}
+                    className="w-12 h-12 rounded-full bg-violet-600 hover:bg-violet-500 active:scale-95 text-white flex items-center justify-center shadow-lg shadow-violet-900/35 transition-all cursor-pointer"
+                  >
+                    <Play className="w-5 h-5 fill-current ml-0.5" />
+                  </button>
+                </div>
+
+                {video.thumbnailUrl ? (
+                  <img 
+                    src={video.thumbnailUrl} 
+                    alt={video.name} 
+                    className="absolute inset-0 w-full h-full object-cover group-hover:scale-[1.04] transition-transform duration-500" 
+                  />
+                ) : (
+                  <div className="flex flex-col items-center gap-1.5">
+                    <span className="text-3xl">🎬</span>
+                    <span className="text-[10px] uppercase tracking-wider text-zinc-600 font-bold">Watch Party Clip</span>
                   </div>
-                  {video.thumbnailUrl ? (
+                )}
+              </div>
+
+              {/* Card Details */}
+              <div className="p-4 flex gap-3 items-start flex-1">
+                {/* Avatar Icon */}
+                <div className="flex-shrink-0">
+                  {video.avatarUrl ? (
                     <img 
-                      src={video.thumbnailUrl} 
-                      alt={video.name} 
-                      style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', objectFit: 'cover' }} 
+                      src={video.avatarUrl} 
+                      alt={video.uploaderName} 
+                      className="w-8 h-8 rounded-full border border-zinc-800 object-cover" 
                     />
                   ) : (
-                    <span className="feed-preview-icon">🎬</span>
+                    <div className="w-8 h-8 rounded-full bg-zinc-800 flex items-center justify-center text-xs font-bold text-zinc-400 border border-zinc-800 uppercase">
+                      {video.uploaderName.charAt(0)}
+                    </div>
                   )}
                 </div>
 
-                <div className="feed-item-details" style={{ display: 'flex', gap: '12px', padding: '16px' }}>
-                  {/* Creator Avatar on left */}
-                  <div style={{ flexShrink: 0 }}>
-                    {video.avatarUrl ? (
-                      <img 
-                        src={video.avatarUrl} 
-                        alt="Avatar" 
-                        className="feed-avatar" 
-                        style={{ width: '36px', height: '36px', borderRadius: '50%', objectFit: 'cover', display: 'block' }} 
-                      />
-                    ) : (
-                      <div 
-                        className="feed-avatar-placeholder" 
-                        style={{ width: '36px', height: '36px', borderRadius: '50%', background: 'rgba(255,255,255,0.1)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '14px', fontWeight: 'bold', color: '#fff' }}
-                      >
-                        {video.uploaderName.charAt(0).toUpperCase()}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Title and creator/action details on right */}
-                  <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                {/* Meta details */}
+                <div className="flex-1 min-w-0 flex flex-col justify-between h-full">
+                  <div>
                     <h3 
-                      className="feed-video-title" 
-                      style={{ margin: 0, fontSize: '15px', fontWeight: '600', color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} 
+                      className="text-sm font-semibold text-zinc-200 truncate leading-snug hover:text-white transition-colors cursor-pointer"
+                      onClick={() => startWatchParty(video.key)}
                       title={video.name}
                     >
                       {video.name}
                     </h3>
-                    
-                    <div className="feed-uploader-text" style={{ display: 'flex', flexDirection: 'column', fontSize: '13px', color: 'var(--text-muted)' }}>
-                      <span className="feed-username" style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '4px', color: 'rgba(255,255,255,0.7)' }}>
-                        {video.uploaderName}
-                        {video.isVerified && <VerifiedBadge size={14} />}
-                        {video.country && ` ${getFlagEmoji(video.country)}`}
-                      </span>
-                      <span className="feed-privacy-tag" style={{ fontSize: '11px', marginTop: '2px', color: 'rgba(255,255,255,0.4)' }}>
-                        {video.isPrivate ? '🔒 Friends Only' : '🌐 Public'}
-                      </span>
-                    </div>
 
-                    <div style={{ display: 'flex', gap: '8px', width: '100%', marginTop: '12px' }}>
-                      <button
-                        className="btn btn-primary start-party-btn"
-                        onClick={() => startWatchParty(video.key)}
-                        style={{ flex: 1, padding: '6px 12px', fontSize: '13px', borderRadius: '6px' }}
-                      >
-                        ✨ Watch Together
-                      </button>
+                    {/* Uploader Details */}
+                    <div className="flex flex-col mt-1">
+                      <span className="text-xs text-zinc-400 flex items-center gap-1 truncate font-medium">
+                        {video.uploaderName}
+                        {video.isVerified && <VerifiedBadge size={12} />}
+                        {video.country && (
+                          <span className="text-xs">{getFlagEmoji(video.country)}</span>
+                        )}
+                      </span>
                     </div>
+                  </div>
+
+                  {/* Tag and Button row */}
+                  <div className="flex items-center justify-between gap-2 mt-4 pt-3 border-t border-zinc-900/60">
+                    <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-zinc-500">
+                      {video.isPrivate ? (
+                        <>
+                          <Lock className="w-2.5 h-2.5 text-zinc-500" />
+                          <span>Friends Only</span>
+                        </>
+                      ) : (
+                        <>
+                          <Globe className="w-2.5 h-2.5 text-zinc-500" />
+                          <span>Public</span>
+                        </>
+                      )}
+                    </span>
+
+                    <button
+                      onClick={() => startWatchParty(video.key)}
+                      className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-800 text-zinc-300 hover:text-white text-[11px] font-bold border border-zinc-800/80 transition-all cursor-pointer active:scale-95"
+                    >
+                      <Sparkles className="w-2.5 h-2.5 text-violet-400" />
+                      <span>Watch</span>
+                    </button>
                   </div>
                 </div>
               </div>
-            ))}
-          </div>
-        )}
-      </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

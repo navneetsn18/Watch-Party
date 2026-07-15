@@ -2,10 +2,11 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
+import { motion, AnimatePresence } from 'framer-motion';
+import { Home, Compass, Search, User, Upload, Coffee, LogOut, ShieldCheck } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { VerifiedBadge } from './VerifiedBadge';
 
-// Helper to convert ISO country code to flag emoji
 export function getFlagEmoji(countryCode) {
   if (!countryCode || countryCode.length !== 2) return '';
   const codePoints = countryCode
@@ -20,8 +21,9 @@ export default function NavBar() {
   const pathname = usePathname();
   const [user, setUser] = useState(null);
   const [profile, setProfile] = useState(null);
+  const [hoveredTab, setHoveredTab] = useState(null);
 
-  // Monitor auth state changes
+  // Monitor auth state
   useEffect(() => {
     async function loadSession() {
       const { data: { session } } = await supabase.auth.getSession();
@@ -72,108 +74,138 @@ export default function NavBar() {
     router.push('/auth');
   }
 
-  // Do not show NavBar on auth page or inside a room page (which is full-screen and has its own TopBar)
   const isAuthPage = pathname === '/auth';
   const isRoomPage = pathname.startsWith('/room/');
 
   if (isAuthPage || isRoomPage) return null;
 
+  const tabs = [
+    { id: '/feed', name: 'Feed', icon: Compass },
+    { id: '/search', name: 'Search', icon: Search },
+    { id: '/', name: 'Lobby', icon: Home },
+    { id: '/profile', name: 'Profile', icon: User },
+  ];
+
   return (
-    <nav className="global-navbar">
-      <div className="navbar-logo" onClick={() => router.push('/')}>
-        🎬 Watch Party
+    <header className="sticky top-0 z-50 w-full border-b border-zinc-800/40 bg-zinc-950/70 backdrop-blur-md px-6 py-3 flex items-center justify-between">
+      {/* Logo */}
+      <div 
+        className="flex items-center gap-2 cursor-pointer text-xl font-extrabold tracking-tight text-white hover:opacity-90 transition-opacity"
+        onClick={() => router.push('/')}
+      >
+        <span className="bg-gradient-to-r from-violet-400 to-fuchsia-500 bg-clip-text text-transparent">🎬 Watch Party</span>
       </div>
 
-      <div className="navbar-links">
-        <button
-          className={`nav-link ${pathname === '/feed' ? 'active' : ''}`}
-          onClick={() => router.push('/feed')}
-        >
-          🏠 Feed
-        </button>
-        <button
-          className={`nav-link ${pathname === '/search' ? 'active' : ''}`}
-          onClick={() => router.push('/search')}
-        >
-          🔍 Search
-        </button>
-        <button
-          className={`nav-link ${pathname === '/' ? 'active' : ''}`}
-          onClick={() => router.push('/')}
-        >
-          🎮 Lobby
-        </button>
-        <button
-          className={`nav-link ${pathname === '/profile' ? 'active' : ''}`}
-          onClick={() => router.push('/profile')}
-        >
-          👤 Profile
-        </button>
-      </div>
+      {/* Tabs */}
+      <nav className="hidden md:flex items-center gap-1 relative">
+        {tabs.map((tab) => {
+          const isActive = pathname === tab.id;
+          const Icon = tab.icon;
+          return (
+            <button
+              key={tab.id}
+              onClick={() => router.push(tab.id)}
+              onMouseEnter={() => setHoveredTab(tab.id)}
+              onMouseLeave={() => setHoveredTab(null)}
+              className={`relative px-4 py-2 text-sm font-medium rounded-full transition-colors duration-250 flex items-center gap-2 ${
+                isActive ? 'text-white' : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              <Icon className="w-4 h-4" />
+              <span>{tab.name}</span>
+              
+              {isActive && (
+                <motion.div
+                  layoutId="active-nav-tab"
+                  className="absolute inset-0 bg-zinc-800/60 rounded-full -z-10"
+                  transition={{ type: 'spring', stiffness: 380, damping: 30 }}
+                />
+              )}
+            </button>
+          );
+        })}
+      </nav>
 
-      <div className="navbar-actions">
+      {/* Actions */}
+      <div className="flex items-center gap-4">
         {/* Upload Button */}
         {user && (
           <button
             onClick={() => router.push('/upload')}
-            className="btn btn-primary"
-            style={{
-              fontSize: '0.85rem',
-              fontWeight: '700',
-              padding: '8px 16px',
-              borderRadius: 'var(--radius-sm)',
-              marginRight: '12px',
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '6px',
-              cursor: 'pointer',
-              border: 'none',
-              height: 'auto'
-            }}
+            className="hidden sm:flex items-center gap-2 px-4 py-2 rounded-full text-xs font-semibold bg-violet-600 hover:bg-violet-500 text-white shadow-lg shadow-violet-900/20 hover:shadow-violet-900/40 active:scale-95 transition-all duration-150 cursor-pointer"
           >
-            📤 Upload Video
+            <Upload className="w-3.5 h-3.5" />
+            <span>Upload</span>
           </button>
         )}
 
-        {/* Buy Me a Coffee Button */}
+        {/* Buy Me a Coffee */}
         <a
           href="https://buymeacoffee.com/navneetsn18"
           target="_blank"
           rel="noopener noreferrer"
-          className="coffee-btn"
+          className="flex items-center justify-center w-8 h-8 rounded-full bg-zinc-800 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 hover:text-white transition-colors cursor-pointer"
+          title="Buy Me a Coffee"
         >
-          ☕
+          <Coffee className="w-4 h-4" />
         </a>
 
+        {/* Profile Avatar & Sign Out */}
         {user && (
-          <div className="navbar-user">
-            <div className="nav-avatar-container">
+          <div className="flex items-center gap-3">
+            {/* Avatar Container with Tooltip */}
+            <div className="group relative cursor-pointer">
               {profile?.avatar_url ? (
-                <img src={profile.avatar_url} alt="Avatar" className="nav-avatar" />
+                <img 
+                  src={profile.avatar_url} 
+                  alt="Avatar" 
+                  className="w-8 h-8 rounded-full border border-zinc-700/60 object-cover" 
+                />
               ) : (
-                <div className="nav-avatar-placeholder">
+                <div className="w-8 h-8 rounded-full border border-zinc-700/60 bg-zinc-800 flex items-center justify-center text-sm font-semibold text-zinc-200">
                   {(profile?.username || 'U').charAt(0).toUpperCase()}
                 </div>
               )}
               
-              {/* Tooltip on Hover */}
-              <div className="nav-profile-tooltip">
-                <div className="tooltip-item">
-                  <strong>Username:</strong> {profile?.username || 'N/A'}
-                  {profile?.is_verified && <VerifiedBadge size={14} />}
+              {/* Dropdown/Tooltip on Hover */}
+              <div className="absolute right-0 top-full mt-2 w-64 p-4 rounded-2xl bg-zinc-900/95 border border-zinc-800/80 shadow-2xl backdrop-blur-md opacity-0 scale-95 pointer-events-none group-hover:opacity-100 group-hover:scale-100 group-hover:pointer-events-auto transition-all duration-200 z-[60] flex flex-col gap-2">
+                <div className="flex items-center gap-2 pb-2 border-b border-zinc-800/60">
+                  <span className="font-bold text-white text-sm truncate flex items-center gap-1.5">
+                    {profile?.username || 'user'}
+                    {profile?.is_verified && <ShieldCheck className="w-4 h-4 text-violet-400 fill-violet-400/20" />}
+                  </span>
+                  {profile?.country && (
+                    <span className="text-sm">{getFlagEmoji(profile.country)}</span>
+                  )}
                 </div>
-                <div className="tooltip-item"><strong>Email:</strong> {user.email}</div>
-                <div className="tooltip-item"><strong>DOB:</strong> {profile?.dob || 'Not set'}</div>
-                <div className="tooltip-item"><strong>Country:</strong> {profile?.country ? `${profile.country} ${getFlagEmoji(profile.country)}` : 'Not set'}</div>
+                <div className="text-xs text-zinc-400 truncate">
+                  <span className="font-medium text-zinc-500">Email: </span>
+                  {user.email}
+                </div>
+                {profile?.dob && (
+                  <div className="text-xs text-zinc-400">
+                    <span className="font-medium text-zinc-500">DOB: </span>
+                    {profile.dob}
+                  </div>
+                )}
+                <div className="text-xs text-zinc-400">
+                  <span className="font-medium text-zinc-500">Scope: </span>
+                  {profile?.is_private ? '🔒 Private' : '🌐 Public'}
+                </div>
               </div>
             </div>
 
-            <button className="btn btn-secondary nav-signout-btn btn-sm" onClick={handleSignOut}>
-              🚪 Out
+            {/* Logout button */}
+            <button 
+              onClick={handleSignOut} 
+              className="flex items-center justify-center p-2 rounded-full hover:bg-zinc-900 border border-transparent hover:border-zinc-800 text-zinc-400 hover:text-red-400 transition-colors duration-150 cursor-pointer"
+              title="Sign Out"
+            >
+              <LogOut className="w-4 h-4" />
             </button>
           </div>
         )}
       </div>
-    </nav>
+    </header>
   );
 }

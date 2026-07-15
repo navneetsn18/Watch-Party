@@ -3,11 +3,11 @@ import React from 'react';
 export function VerifiedBadge({ size = 14 }) {
   return (
     <svg 
-      className="twitter-blue-tick" 
+      className="violet-tick" 
       viewBox="0 0 24 24" 
       width={size} 
       height={size} 
-      fill="#1d9bf0" 
+      fill="#a78bfa" 
       style={{ display: 'inline-block', verticalAlign: 'middle', marginLeft: '4px', flexShrink: 0 }}
       title="Verified Creator"
     >

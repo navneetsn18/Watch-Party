@@ -2,6 +2,8 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import { motion, AnimatePresence } from 'framer-motion';
+import { Tv, Mail, Lock, User, Calendar, Globe, AlertCircle, CheckCircle2, Loader2 } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 
 const COUNTRIES = [
@@ -115,121 +117,179 @@ export default function AuthPage() {
   }
 
   return (
-    <div className="auth-container">
-      <div className="auth-logo">
-        <div className="logo-icon">🎬</div>
-        <h1>Watch Party</h1>
-        <p>Your social space to watch, share, and connect</p>
+    <div className="min-h-screen w-full flex flex-col items-center justify-center bg-[#07070a] px-4 py-16 relative overflow-hidden">
+      {/* Background blurs */}
+      <div className="absolute top-1/4 left-1/3 w-[350px] h-[350px] rounded-full bg-violet-900/10 blur-[100px] pointer-events-none" />
+      <div className="absolute bottom-1/4 right-1/3 w-[350px] h-[350px] rounded-full bg-indigo-900/10 blur-[100px] pointer-events-none" />
+
+      {/* Brand Logo box */}
+      <div className="text-center mb-8 relative z-10 flex flex-col items-center">
+        <div className="inline-flex p-3 rounded-2xl bg-zinc-900/50 border border-zinc-800 mb-3 shadow-xl">
+          <Tv className="w-6 h-6 text-violet-400" />
+        </div>
+        <h1 className="text-2xl font-black tracking-tight text-white mb-1">Watch Party</h1>
+        <p className="text-xs text-zinc-400">Share, watch, and connect in perfect sync</p>
       </div>
 
-      <div className="auth-card">
-        <div className="auth-tabs">
+      {/* Auth Card container */}
+      <div className="relative z-10 w-full max-w-md bg-zinc-900/40 border border-zinc-800/80 backdrop-blur-xl p-8 rounded-3xl shadow-2xl shadow-black/60 flex flex-col gap-6">
+        {/* Toggle Slider Tabs */}
+        <div className="w-full grid grid-cols-2 p-1 rounded-xl bg-zinc-950 border border-zinc-900 relative">
           <button
-            className={`auth-tab ${!isRegistering ? 'active' : ''}`}
             onClick={() => {
               setIsRegistering(false);
               setMessage({ type: '', text: '' });
             }}
-            type="button"
+            className={`py-2 text-xs font-semibold rounded-lg transition-colors relative z-10 ${
+              !isRegistering ? 'text-white' : 'text-zinc-500 hover:text-zinc-400'
+            }`}
           >
             Sign In
+            {!isRegistering && (
+              <motion.div
+                layoutId="auth-active-tab"
+                className="absolute inset-0 bg-zinc-800 rounded-lg -z-10 border border-zinc-800"
+                transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+              />
+            )}
           </button>
           <button
-            className={`auth-tab ${isRegistering ? 'active' : ''}`}
             onClick={() => {
               setIsRegistering(true);
               setMessage({ type: '', text: '' });
             }}
-            type="button"
+            className={`py-2 text-xs font-semibold rounded-lg transition-colors relative z-10 ${
+              isRegistering ? 'text-white' : 'text-zinc-500 hover:text-zinc-400'
+            }`}
           >
             Register
+            {isRegistering && (
+              <motion.div
+                layoutId="auth-active-tab"
+                className="absolute inset-0 bg-zinc-800 rounded-lg -z-10 border border-zinc-800"
+                transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+              />
+            )}
           </button>
         </div>
 
-        <form onSubmit={handleAuth} className="auth-form">
-          {message.text && (
-            <div className={`auth-message ${message.type}`}>
-              {message.type === 'error' ? '⚠️' : '✅'} {message.text}
-            </div>
-          )}
+        {/* Input Form */}
+        <form onSubmit={handleAuth} className="flex flex-col gap-4">
+          <AnimatePresence mode="wait">
+            {message.text && (
+              <motion.div
+                initial={{ opacity: 0, y: -5 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -5 }}
+                className={`p-3 rounded-xl border text-xs flex items-start gap-2 ${
+                  message.type === 'error'
+                    ? 'bg-red-950/20 border-red-900/30 text-red-400'
+                    : 'bg-emerald-950/20 border-emerald-900/30 text-emerald-400'
+                }`}
+              >
+                {message.type === 'error' ? <AlertCircle className="w-4 h-4 flex-shrink-0" /> : <CheckCircle2 className="w-4 h-4 flex-shrink-0" />}
+                <span>{message.text}</span>
+              </motion.div>
+            )}
+          </AnimatePresence>
 
+          {/* Registration Fields */}
           {isRegistering && (
-            <>
-              <div className="input-group">
-                <label className="input-label">Username</label>
+            <div className="flex flex-col gap-4">
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-semibold text-zinc-400 flex items-center gap-1.5">
+                  <User className="w-3.5 h-3.5 text-zinc-500" /> Username
+                </label>
                 <input
                   type="text"
-                  className="input-field"
-                  placeholder="Choose a username (e.g. tofuthecat)"
+                  className="w-full px-4 py-2.5 rounded-xl bg-zinc-950 border border-zinc-800 text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-violet-600 focus:ring-1 focus:ring-violet-600 text-sm transition-all"
+                  placeholder="Choose username"
                   maxLength={20}
                   required
                   value={username}
                   onChange={(e) => setUsername(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''))}
                 />
-                <span className="input-hint">Lowercase, numbers, and underscores only</span>
+                <span className="text-[10px] text-zinc-500 ml-1">Lowercase, numbers, and underscores only</span>
               </div>
 
-              <div className="input-row" style={{ display: 'flex', gap: '16px' }}>
-                <div className="input-group" style={{ flex: 1 }}>
-                  <label className="input-label">Country</label>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-xs font-semibold text-zinc-400 flex items-center gap-1.5">
+                    <Globe className="w-3.5 h-3.5 text-zinc-500" /> Country
+                  </label>
                   <select
-                    className="input-field"
+                    className="w-full px-3 py-2.5 rounded-xl bg-zinc-950 border border-zinc-800 text-zinc-200 focus:outline-none focus:border-violet-600 text-sm transition-all cursor-pointer"
                     value={country}
                     onChange={(e) => setCountry(e.target.value)}
-                    style={{ height: '42px', backgroundColor: '#0d0d14', border: '1px solid #262636', borderRadius: '8px', color: '#fff', outline: 'none' }}
                   >
                     {COUNTRIES.map(c => (
-                      <option key={c.code} value={c.code}>
+                      <option key={c.code} value={c.code} className="bg-zinc-905">
                         {c.name}
                       </option>
                     ))}
                   </select>
                 </div>
 
-                <div className="input-group" style={{ flex: 1 }}>
-                  <label className="input-label">Date of Birth</label>
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-xs font-semibold text-zinc-400 flex items-center gap-1.5">
+                    <Calendar className="w-3.5 h-3.5 text-zinc-500" /> Date of Birth
+                  </label>
                   <input
                     type="date"
-                    className="input-field"
+                    className="w-full px-3 py-2 rounded-xl bg-zinc-950 border border-zinc-800 text-zinc-250 focus:outline-none focus:border-violet-600 text-sm transition-all"
                     required
                     value={dob}
                     onChange={(e) => setDob(e.target.value)}
                   />
                 </div>
               </div>
-            </>
+            </div>
           )}
 
-          <div className="input-group">
-            <label className="input-label">Email</label>
+          {/* Email field */}
+          <div className="flex flex-col gap-1.5">
+            <label className="text-xs font-semibold text-zinc-400 flex items-center gap-1.5">
+              <Mail className="w-3.5 h-3.5 text-zinc-500" /> Email
+            </label>
             <input
               type="email"
-              className="input-field"
-              placeholder="Enter your email"
+              className="w-full px-4 py-2.5 rounded-xl bg-zinc-950 border border-zinc-800 text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-violet-600 focus:ring-1 focus:ring-violet-600 text-sm transition-all"
+              placeholder="name@example.com"
               required
               value={email}
               onChange={(e) => setEmail(e.target.value)}
             />
           </div>
 
-          <div className="input-group">
-            <label className="input-label">Password</label>
+          {/* Password field */}
+          <div className="flex flex-col gap-1.5">
+            <label className="text-xs font-semibold text-zinc-400 flex items-center gap-1.5">
+              <Lock className="w-3.5 h-3.5 text-zinc-500" /> Password
+            </label>
             <input
               type="password"
-              className="input-field"
-              placeholder="Enter your password"
+              className="w-full px-4 py-2.5 rounded-xl bg-zinc-950 border border-zinc-800 text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-violet-600 focus:ring-1 focus:ring-violet-600 text-sm transition-all"
+              placeholder="••••••••"
               required
               value={password}
               onChange={(e) => setPassword(e.target.value)}
             />
           </div>
 
-          <button className="btn btn-primary auth-submit" type="submit" disabled={loading}>
-            {loading ? <div className="spinner-small" /> : isRegistering ? '🚀 Create Account' : '🔑 Sign In'}
+          {/* Submit Button */}
+          <button 
+            type="submit" 
+            disabled={loading}
+            className="w-full mt-2 py-3 rounded-xl bg-violet-600 hover:bg-violet-500 active:scale-[0.98] text-white font-semibold text-sm transition-all duration-150 flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-violet-900/20 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {loading ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <span>{isRegistering ? 'Create Account' : 'Sign In'}</span>
+            )}
           </button>
         </form>
       </div>
     </div>
   );
 }
-

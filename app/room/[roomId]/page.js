@@ -2,6 +2,8 @@
 
 import { useState, useEffect, useRef, useCallback, use, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
+import { motion, AnimatePresence } from 'framer-motion';
+import { Trash2, MessageSquare, Tv, Crown, Eye, ShieldAlert, ShieldCheck, Loader2 } from 'lucide-react';
 import { getSocket, disconnectSocket } from '../../../lib/socket';
 import { formatSize } from '../../../lib/utils';
 import { ToastProvider, useToast } from '../../../components/Toast';
@@ -83,27 +85,23 @@ function RoomContent({ roomId }) {
   const isHostRef = useRef(isHost);
   useEffect(() => { isHostRef.current = isHost; }, [isHost]);
 
-  // ── Stable refs for callbacks used inside socket effect ──
-  // This prevents the socket effect from re-running when these change
   const showToastRef = useRef(showToast);
   const currentVideoKeyRef = useRef(currentVideoKey);
   useEffect(() => { showToastRef.current = showToast; }, [showToast]);
   useEffect(() => { currentVideoKeyRef.current = currentVideoKey; }, [currentVideoKey]);
 
-  // ── Push fullscreen notification ──
+  // Fullscreen notification
   const pushFsNotification = useCallback(({ message, sender, isSystem }) => {
     const id = ++fsNotifIdRef.current;
     const notif = { id, message, sender, isSystem, exiting: false };
-    setFsNotifications(prev => [...prev.slice(-4), notif]); // keep max 5
+    setFsNotifications(prev => [...prev.slice(-4), notif]);
 
-    // Start exit animation after 2s
     setTimeout(() => {
       setFsNotifications(prev =>
         prev.map(n => n.id === id ? { ...n, exiting: true } : n)
       );
     }, 2000);
 
-    // Remove after exit animation (2s + 0.5s for animation)
     setTimeout(() => {
       setFsNotifications(prev => prev.filter(n => n.id !== id));
     }, 2500);
@@ -112,7 +110,7 @@ function RoomContent({ roomId }) {
   const pushFsNotificationRef = useRef(pushFsNotification);
   useEffect(() => { pushFsNotificationRef.current = pushFsNotification; }, [pushFsNotification]);
 
-  // ── Load video by key ──
+  // Load video by key
   const loadVideo = useCallback(async (key) => {
     if (key === currentVideoKeyRef.current) return false;
     currentVideoKeyRef.current = key;
@@ -137,10 +135,10 @@ function RoomContent({ roomId }) {
 
   const isVideoReady = useCallback(() => {
     const video = playerRef.current?.getVideo();
-    return video && video.readyState >= 1; // 1 = HAVE_METADATA
+    return video && video.readyState >= 1; 
   }, []);
 
-  // ── Load video list ──
+  // Load video list
   const loadVideoList = useCallback(async () => {
     try {
       const session = await supabase.auth.getSession();
@@ -184,9 +182,9 @@ function RoomContent({ roomId }) {
     }
   };
 
-  // ── Socket connection (depends on roomId + username + profile) ──
+  // Socket connection
   useEffect(() => {
-    if (authLoading) return; // Wait until auth check completes
+    if (authLoading) return;
 
     const socket = getSocket();
     socketRef.current = socket;
@@ -204,7 +202,6 @@ function RoomContent({ roomId }) {
       socket.emit('join-room', joinData);
     });
 
-    // If already connected (e.g. HMR), join immediately
     if (socket.connected) {
       setConnected(true);
       socket.emit('join-room', joinData);
@@ -333,11 +330,9 @@ function RoomContent({ roomId }) {
     socket.on('chat-message', ({ sender, message, isSystem }) => {
       if (isSystem) {
         addSystemMessage(message);
-        // Push fullscreen notification for system messages (join/leave)
         pushFsNotificationRef.current({ message, isSystem: true });
       } else {
         setMessages(prev => [...prev, { sender, message }]);
-        // Push fullscreen notification for chat messages
         pushFsNotificationRef.current({ message, sender, isSystem: false });
       }
     });
@@ -347,9 +342,7 @@ function RoomContent({ roomId }) {
       if (player) player.spawnEmoji(emoji);
     });
 
-    // ── Guest request events ──
     socket.on('guest-request-received', (request) => {
-      // Host receives a guest request
       setGuestRequests(prev => [...prev, request]);
     });
 
@@ -378,7 +371,7 @@ function RoomContent({ roomId }) {
     }
   }, [isHost, initialVideo, connected, roomId, loadVideo]);
 
-  // ── Host periodic playback time broadcast ──
+  // Host periodic playback time broadcast
   useEffect(() => {
     if (!isHost || !connected) return;
     const interval = setInterval(() => {
@@ -402,7 +395,6 @@ function RoomContent({ roomId }) {
     return () => clearInterval(interval);
   }, [isHost, connected, roomId]);
 
-  // ── Helpers ──
   function addSystemMessage(text) {
     setMessages(prev => [...prev, { message: text, isSystem: true }]);
   }
@@ -415,10 +407,8 @@ function RoomContent({ roomId }) {
   }
 
   function handleSendReaction(emoji) {
-    // Spawn locally
     const player = playerRef.current;
     if (player) player.spawnEmoji(emoji);
-    // Broadcast to others
     const socket = socketRef.current;
     if (socket) socket.emit('reaction', { roomId, emoji });
   }
@@ -489,14 +479,12 @@ function RoomContent({ roomId }) {
     showToast('📋 Room code copied: ' + roomId);
   }
 
-  // ── Guest request action (guest side) ──
   function handleRequestAction(action) {
     const socket = socketRef.current;
     if (!socket) return;
     socket.emit('guest-request', { roomId, action });
   }
 
-  // ── Host approve/reject guest requests ──
   function handleApproveRequest(request) {
     const socket = socketRef.current;
     if (!socket) return;
@@ -523,7 +511,8 @@ function RoomContent({ roomId }) {
   const canControl = isHost || guestControls;
 
   return (
-    <div className="app-shell">
+    <div className="flex flex-col h-screen w-screen bg-zinc-950 overflow-hidden text-zinc-100">
+      {/* Top Header */}
       <TopBar
         roomId={roomId}
         userCount={userCount}
@@ -535,137 +524,160 @@ function RoomContent({ roomId }) {
         onCopyRoomId={handleCopyRoomId}
       />
 
-      <div className="main-layout">
-        <VideoPlayer
-          ref={playerRef}
-          videoUrl={videoUrl}
-          isHost={isHost}
-          guestControls={guestControls}
-          canControl={canControl}
-          onPlay={handlePlay}
-          onPause={handlePause}
-          onSeek={handleSeek}
-          onLoadedMetadata={handleLoadedMetadata}
-          onHostBuffering={handleHostBuffering}
-          fullscreenNotifications={fsNotifications}
-          onRequestAction={!canControl ? handleRequestAction : undefined}
-          guestRequests={guestRequests}
-          onApproveRequest={handleApproveRequest}
-          onRejectRequest={handleRejectRequest}
-        />
+      {/* Main Splits Workspace */}
+      <div className="flex-1 flex flex-col md:flex-row min-h-0 overflow-hidden relative">
+        {/* Left Side: Video Player Container */}
+        <div className="flex-1 bg-black relative flex items-center justify-center min-h-[40vh] md:min-h-0 overflow-hidden">
+          <VideoPlayer
+            ref={playerRef}
+            videoUrl={videoUrl}
+            isHost={isHost}
+            guestControls={guestControls}
+            canControl={canControl}
+            onPlay={handlePlay}
+            onPause={handlePause}
+            onSeek={handleSeek}
+            onLoadedMetadata={handleLoadedMetadata}
+            onHostBuffering={handleHostBuffering}
+            fullscreenNotifications={fsNotifications}
+            onRequestAction={!canControl ? handleRequestAction : undefined}
+            guestRequests={guestRequests}
+            onApproveRequest={handleApproveRequest}
+            onRejectRequest={handleRejectRequest}
+          />
+        </div>
 
-        <div className="sidebar">
-          <div className="sidebar-tab-bar">
+        {/* Right Side: Sidebar Panel */}
+        <aside className="w-full md:w-[350px] border-t md:border-t-0 md:border-l border-zinc-900 bg-zinc-950 flex flex-col flex-shrink-0 min-h-0 overflow-hidden select-none">
+          {/* Tab Selection */}
+          <div className="flex border-b border-zinc-900 bg-zinc-950/80 backdrop-blur">
             <button
-              className={`sidebar-tab ${activeTab === 'chat' ? 'active' : ''}`}
               onClick={() => setActiveTab('chat')}
-              type="button"
+              className={`flex-1 py-3 text-xs font-bold transition-all relative ${
+                activeTab === 'chat' ? 'text-white font-black' : 'text-zinc-500 hover:text-zinc-300'
+              }`}
             >
-              💬 Chat
+              <span className="flex items-center justify-center gap-1.5">
+                <MessageSquare className="w-3.5 h-3.5" />
+                <span>Chat</span>
+              </span>
+              {activeTab === 'chat' && (
+                <motion.div
+                  layoutId="room-sidebar-tab"
+                  className="absolute bottom-0 left-0 right-0 h-[2px] bg-violet-500"
+                  transition={{ type: 'spring', stiffness: 350, damping: 30 }}
+                />
+              )}
             </button>
             {isHost && (
               <button
-                className={`sidebar-tab ${activeTab === 'videos' ? 'active' : ''}`}
                 onClick={() => setActiveTab('videos')}
-                type="button"
+                className={`flex-1 py-3 text-xs font-bold transition-all relative ${
+                  activeTab === 'videos' ? 'text-white font-black' : 'text-zinc-500 hover:text-zinc-300'
+                }`}
               >
-                🎬 Videos
+                <span className="flex items-center justify-center gap-1.5">
+                  <Tv className="w-3.5 h-3.5" />
+                  <span>Videos</span>
+                </span>
+                {activeTab === 'videos' && (
+                  <motion.div
+                    layoutId="room-sidebar-tab"
+                    className="absolute bottom-0 left-0 right-0 h-[2px] bg-violet-500"
+                    transition={{ type: 'spring', stiffness: 350, damping: 30 }}
+                  />
+                )}
               </button>
             )}
           </div>
 
-          {/* Chat pane */}
-          <div className={`sidebar-pane ${activeTab === 'chat' ? 'active' : ''}`}>
-            <ChatPanel
-              messages={messages}
-              onSendMessage={handleSendMessage}
-              onSendReaction={handleSendReaction}
-              username={username}
-            />
-          </div>
-
-          {/* Videos pane (host only) */}
-          <div className={`sidebar-pane ${activeTab === 'videos' ? 'active' : ''}`}>
-            <div className="sidebar-section">
-              {isHost ? (
-                <div className="notice-host">
-                  You are the host. Pick a video to start.
-                </div>
-              ) : (
-                <div className="notice-guest">
-                  Waiting for host to select a video…
-                </div>
-              )}
+          {/* Chat Panel view */}
+          {activeTab === 'chat' && (
+            <div className="flex-1 flex flex-col min-h-0 overflow-hidden bg-zinc-950/40">
+              <ChatPanel
+                messages={messages}
+                onSendMessage={handleSendMessage}
+                onSendReaction={handleSendReaction}
+                username={username}
+              />
             </div>
-            <div className="sidebar-section">
-              <h3>Available Videos</h3>
-              <div className="video-list">
+          )}
+
+          {/* Videos picker panel */}
+          {activeTab === 'videos' && isHost && (
+            <div className="flex-1 flex flex-col min-h-0 overflow-hidden bg-zinc-950/40">
+              {/* Host instructions banner */}
+              <div className="p-3 bg-violet-950/20 border-b border-violet-900/35 text-[10px] text-violet-300 font-semibold flex items-center gap-1.5">
+                <Crown className="w-3.5 h-3.5 text-violet-400" />
+                <span>You are Room Host. Pick clips below to synchronize playbacks.</span>
+              </div>
+
+              {/* Videos list scrolling grid */}
+              <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-2">
+                <span className="text-[10px] uppercase font-black text-zinc-500 tracking-wider mb-1 block">
+                  Available Videos ({videos.length})
+                </span>
+
                 {videos.length === 0 ? (
-                  <div style={{ color: 'var(--text-muted)', fontSize: '13px' }}>
-                    No videos found. Add .mp4 or .mkv files to the videos/ folder.
+                  <div className="text-center py-8 border border-zinc-900 rounded-xl bg-zinc-950/20 text-zinc-500 text-xs leading-relaxed">
+                    No videos found. Upload video files via the Navigation menu first!
                   </div>
                 ) : (
-                  videos.map((v) => (
-                    <div
-                      key={v.key}
-                      className={`video-item ${currentVideoKey === v.key ? 'active' : ''}`}
-                      onClick={() => handleSelectVideo(v)}
-                      style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', padding: '10px' }}
-                    >
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, flex: 1 }}>
-                        <span className="video-item-icon">🎬</span>
-                        <div className="video-item-details-box" style={{ display: 'flex', flexDirection: 'column', minWidth: 0, flex: 1 }}>
-                          <span className="video-item-name" title={v.name} style={{ fontWeight: '500', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            {v.name}
-                          </span>
-                          <span className="video-item-uploader" style={{ fontSize: '11px', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            By: {v.uploaderName}
-                            {v.isVerified && <VerifiedBadge size={12} />}
-                            {v.country && ` ${getFlagEmoji(v.country)}`}
-                            {v.isPrivate ? ' 🔒' : ''}
-                          </span>
+                  videos.map((v) => {
+                    const isActive = currentVideoKey === v.key;
+                    return (
+                      <div
+                        key={v.key}
+                        onClick={() => handleSelectVideo(v)}
+                        className={`flex items-center justify-between p-3 rounded-xl border transition-all cursor-pointer ${
+                          isActive 
+                            ? 'bg-violet-950/15 border-violet-800/40 text-white' 
+                            : 'bg-zinc-950 border-zinc-900/80 text-zinc-300 hover:border-zinc-800 hover:text-white'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                          <span className="text-lg">🎬</span>
+                          <div className="flex flex-col min-w-0 flex-1">
+                            <span className="text-xs font-bold truncate" title={v.name}>
+                              {v.name}
+                            </span>
+                            <span className="text-[9px] text-zinc-500 truncate mt-0.5">
+                              By: {v.uploaderName} {v.country && getFlagEmoji(v.country)}
+                              {v.isPrivate ? ' • 🔒' : ''}
+                            </span>
+                          </div>
                         </div>
+
+                        {v.uploaderId === profile?.id && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteVideo(v.key);
+                            }}
+                            className="p-1.5 rounded-lg text-zinc-500 hover:text-red-400 hover:bg-red-950/20 transition-all cursor-pointer flex items-center justify-center border border-transparent hover:border-red-900/30"
+                            title="Delete Video"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
                       </div>
-                      {v.uploaderId === profile?.id && (
-                        <button
-                          className="btn-delete-video-sidebar"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleDeleteVideo(v.key);
-                          }}
-                          style={{
-                            background: 'none',
-                            border: 'none',
-                            color: '#ef4444',
-                            cursor: 'pointer',
-                            padding: '4px 8px',
-                            fontSize: '14px',
-                            borderRadius: '4px',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center'
-                          }}
-                          title="Delete Video"
-                        >
-                          🗑️
-                        </button>
-                      )}
-                    </div>
-                  ))
+                    );
+                  })
                 )}
               </div>
             </div>
-          </div>
-        </div>
+          )}
+        </aside>
       </div>
 
+      {/* Invite Share Modal overlay */}
       <ShareModal
         roomId={roomId}
         isOpen={shareOpen}
         onClose={() => setShareOpen(false)}
       />
 
-      {/* Guest request approval popups (host only) */}
+      {/* Guest controller request popup (host-only) */}
       {isHost && (
         <GuestRequestModal
           requests={guestRequests}
@@ -683,7 +695,12 @@ export default function RoomPage({ params }) {
 
   return (
     <ToastProvider>
-      <Suspense fallback={<div className="app-shell" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)' }}>Loading room…</div>}>
+      <Suspense fallback={
+        <div className="h-screen w-screen bg-[#07070a] flex items-center justify-center text-zinc-400 text-xs font-medium">
+          <Loader2 className="w-6 h-6 text-violet-500 animate-spin mr-2" />
+          <span>Synchronizing Lobby...</span>
+        </div>
+      }>
         <RoomContent roomId={roomId} />
       </Suspense>
     </ToastProvider>

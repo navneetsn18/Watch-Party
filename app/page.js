@@ -2,6 +2,8 @@
 
 import { useState, useEffect, useRef, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
+import { motion } from 'framer-motion';
+import { Tv, Sparkles, LogIn, CheckCircle2, XCircle, AlertCircle, Loader2 } from 'lucide-react';
 import { generateRoomId } from '../lib/utils';
 import { supabase } from '../lib/supabase';
 
@@ -81,12 +83,10 @@ function LobbyContent() {
   function createRoom() {
     const name = username.trim() || 'Host';
     const code = customCode.trim().toUpperCase();
-    // Use custom code if provided and available, otherwise generate
     let id;
     if (code && code.length >= 3 && /^[A-Z0-9]+$/.test(code) && customCodeStatus === 'available') {
       id = code;
     } else if (code && customCodeStatus !== 'available') {
-      // If custom code entered but not available, don't proceed
       return;
     } else {
       id = generateRoomId();
@@ -116,114 +116,179 @@ function LobbyContent() {
 
   if (loading) {
     return (
-      <div className="lobby-container">
-        <div className="lobby-logo">
-          <div className="logo-icon">🎬</div>
-          <h1>Watch Party</h1>
-          <p>Securing session...</p>
-          <div className="spinner" style={{ margin: '20px auto' }} />
+      <div className="min-height-[90vh] w-full flex items-center justify-center bg-[#07070a] px-4 relative overflow-hidden">
+        {/* Glow */}
+        <div className="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 w-80 h-80 rounded-full bg-violet-600/10 blur-3xl" />
+        
+        <div className="text-center relative z-10 flex flex-col items-center">
+          <div className="w-16 h-16 rounded-3xl bg-zinc-900 border border-zinc-800 flex items-center justify-center mb-6 shadow-xl shadow-zinc-950/40">
+            <Tv className="w-8 h-8 text-violet-400 animate-pulse" />
+          </div>
+          <h1 className="text-2xl font-black tracking-tight text-white mb-2">Watch Party</h1>
+          <p className="text-zinc-400 text-sm mb-4">Securing your session...</p>
+          <Loader2 className="w-6 h-6 text-violet-500 animate-spin" />
         </div>
       </div>
     );
   }
 
   return (
-    <div className="lobby-container">
-      <div className="lobby-logo">
-        <div className="logo-icon">🎬</div>
-        <h1>Watch Party</h1>
-        <p>Sync up and enjoy movies together in perfect harmony</p>
-      </div>
+    <div className="min-h-[85vh] w-full flex flex-col items-center justify-center bg-[#07070a] px-4 py-12 relative overflow-hidden">
+      {/* Background Ambience */}
+      <div className="absolute top-1/3 left-1/4 w-[400px] h-[400px] rounded-full bg-violet-900/10 blur-[120px] pointer-events-none" />
+      <div className="absolute bottom-1/3 right-1/4 w-[400px] h-[400px] rounded-full bg-indigo-900/10 blur-[120px] pointer-events-none" />
 
-      <div className="lobby-card">
+      {/* Main Brand Intro */}
+      <motion.div 
+        initial={{ opacity: 0, y: -20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.5 }}
+        className="text-center mb-10 relative z-10 max-w-md"
+      >
+        <div className="inline-flex p-3 rounded-2xl bg-zinc-900/60 border border-zinc-800/80 mb-4 shadow-xl shadow-zinc-950/50">
+          <Tv className="w-7 h-7 text-violet-400" />
+        </div>
+        <h1 className="text-4xl font-extrabold tracking-tight text-white mb-3">
+          Watch Party
+        </h1>
+        <p className="text-sm text-zinc-400 leading-relaxed px-4">
+          Synchronize video playback and chat in real-time. Invite your friends, share the link, and enjoy movie night together.
+        </p>
+      </motion.div>
+
+      {/* Lobby Form Card */}
+      <motion.div 
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={{ opacity: 1, scale: 1 }}
+        transition={{ duration: 0.4, delay: 0.15 }}
+        className="relative z-10 w-full max-w-md bg-zinc-900/50 border border-zinc-800/60 backdrop-blur-xl p-8 rounded-3xl shadow-2xl shadow-black/80 flex flex-col gap-6"
+      >
         {inviteRoom ? (
-          /* Guest invite flow */
-          <div className="lobby-section">
-            <div className="invite-banner">
-              You&apos;ve been invited to room <strong>{inviteRoom.toUpperCase()}</strong>
+          /* Guest Invite Flow */
+          <div className="flex flex-col gap-4">
+            <div className="p-4 rounded-xl bg-violet-950/20 border border-violet-900/40 text-sm text-center text-zinc-200">
+              You&apos;ve been invited to join room <strong className="text-violet-300 font-mono tracking-wider">{inviteRoom.toUpperCase()}</strong>
             </div>
-            <button className="btn btn-primary" onClick={joinFromInvite} style={{ marginTop: '12px', width: '100%' }}>
-              Join room →
+            
+            <button 
+              onClick={joinFromInvite}
+              className="w-full py-3 rounded-xl bg-violet-600 hover:bg-violet-500 active:scale-[0.98] text-white font-semibold text-sm transition-all duration-150 flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-violet-900/20"
+            >
+              <span>Join Room</span>
+              <LogIn className="w-4 h-4" />
             </button>
           </div>
         ) : (
-          /* Host or manual join flow */
+          /* Custom Create / Join Flow */
           <>
-            {/* Create Room Section */}
-            <div className="lobby-section">
-              <h3 className="lobby-section-title">Create Watch Party</h3>
-              <div className="input-group custom-code-group">
-                <label className="input-label">Custom room code (optional)</label>
-                <input
-                  id="custom-code-input"
-                  type="text"
-                  className="input-field"
-                  placeholder="e.g. MOVIE-NIGHT"
-                  maxLength={12}
-                  value={customCode}
-                  onChange={(e) => setCustomCode(e.target.value.toUpperCase().replace(/[^A-Z0-9-]/g, ''))}
-                  onKeyDown={(e) => handleKeyDown(e, createRoom)}
-                  style={{ textTransform: 'uppercase', letterSpacing: '1px' }}
-                />
+            {/* Create Watch Party Section */}
+            <div className="flex flex-col gap-4">
+              <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-violet-400" />
+                <span>Create Watch Party</span>
+              </h2>
+              
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-semibold text-zinc-400">Custom Room Code (Optional)</label>
+                <div className="relative">
+                  <input
+                    id="custom-code-input"
+                    type="text"
+                    className="w-full px-4 py-3 rounded-xl bg-zinc-950 border border-zinc-800 text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-violet-600 focus:ring-1 focus:ring-violet-600 text-sm font-mono tracking-widest uppercase transition-all duration-150"
+                    placeholder="e.g. MOVIE-NIGHT"
+                    maxLength={12}
+                    value={customCode}
+                    onChange={(e) => setCustomCode(e.target.value.toUpperCase().replace(/[^A-Z0-9-]/g, ''))}
+                    onKeyDown={(e) => handleKeyDown(e, createRoom)}
+                  />
+                </div>
+
+                {/* Validation Response status */}
                 {customCodeStatus && (
-                  <div className={`code-availability ${customCodeStatus}`}>
-                    <span className="code-availability-dot" />
-                    {customCodeStatus === 'checking' && 'Checking availability…'}
-                    {customCodeStatus === 'available' && 'Code is available!'}
-                    {customCodeStatus === 'taken' && 'Code is already in use'}
-                    {customCodeStatus === 'invalid' && 'Min 3 alphanumeric characters'}
+                  <div className="flex items-center gap-1.5 mt-1 text-xs transition-opacity duration-150">
+                    {customCodeStatus === 'checking' && (
+                      <span className="text-zinc-500 flex items-center gap-1">
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" /> Checking availability...
+                      </span>
+                    )}
+                    {customCodeStatus === 'available' && (
+                      <span className="text-emerald-400 flex items-center gap-1">
+                        <CheckCircle2 className="w-3.5 h-3.5" /> Room code is available!
+                      </span>
+                    )}
+                    {customCodeStatus === 'taken' && (
+                      <span className="text-rose-400 flex items-center gap-1">
+                        <XCircle className="w-3.5 h-3.5" /> Code is already in use
+                      </span>
+                    )}
+                    {customCodeStatus === 'invalid' && (
+                      <span className="text-amber-400 flex items-center gap-1">
+                        <AlertCircle className="w-3.5 h-3.5" /> Min 3 alphanumeric characters
+                      </span>
+                    )}
                   </div>
                 )}
               </div>
 
               <button
-                className="btn btn-primary"
                 onClick={createRoom}
                 disabled={customCode.trim() && customCodeStatus !== 'available'}
-                style={{
-                  marginTop: '10px',
-                  width: '100%',
-                  opacity: (customCode.trim() && customCodeStatus !== 'available') ? 0.5 : 1,
-                  pointerEvents: (customCode.trim() && customCodeStatus !== 'available') ? 'none' : 'auto',
-                }}
+                className="w-full py-3 rounded-xl bg-violet-600 hover:bg-violet-600 text-white font-semibold text-sm transition-all duration-150 flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-violet-950/20 active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed disabled:pointer-events-none"
               >
-                ✨ Create a room
+                <span>Create a room</span>
               </button>
             </div>
 
-            <div className="divider">or</div>
+            {/* Divider */}
+            <div className="relative flex py-2 items-center">
+              <div className="flex-grow border-t border-zinc-800/80"></div>
+              <span className="flex-shrink mx-4 text-zinc-500 text-xs font-semibold uppercase tracking-wider">or</span>
+              <div className="flex-grow border-t border-zinc-800/80"></div>
+            </div>
 
-            {/* Join Room Section */}
-            <div className="lobby-section">
-              <h3 className="lobby-section-title">Join Existing Party</h3>
-              <div className="input-group">
-                <label className="input-label">Room code</label>
+            {/* Join Existing Section */}
+            <div className="flex flex-col gap-4">
+              <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                <LogIn className="w-4 h-4 text-indigo-400" />
+                <span>Join Existing Party</span>
+              </h2>
+
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-semibold text-zinc-400">Room Code</label>
                 <input
                   type="text"
-                  className="input-field"
+                  className="w-full px-4 py-3 rounded-xl bg-zinc-950 border border-zinc-800 text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-indigo-650 focus:ring-1 focus:ring-indigo-650 text-sm font-mono tracking-widest uppercase transition-all duration-150"
                   placeholder="e.g. ABC123"
                   maxLength={12}
                   value={roomCode}
                   onChange={(e) => setRoomCode(e.target.value.toUpperCase())}
                   onKeyDown={(e) => handleKeyDown(e, joinRoom)}
-                  style={{ textTransform: 'uppercase' }}
                 />
               </div>
 
-              <button className="btn btn-secondary" onClick={joinRoom} style={{ marginTop: '10px', width: '100%' }}>
-                Join room →
+              <button
+                onClick={joinRoom}
+                className="w-full py-3 rounded-xl bg-zinc-800 hover:bg-zinc-750 text-white font-semibold text-sm transition-all duration-150 flex items-center justify-center gap-2 cursor-pointer border border-zinc-700/40 active:scale-[0.98]"
+              >
+                <span>Join room</span>
               </button>
             </div>
           </>
         )}
-      </div>
+      </motion.div>
     </div>
   );
 }
 
 export default function LobbyPage() {
   return (
-    <Suspense fallback={<div className="lobby-container"><div className="lobby-logo"><div className="logo-icon">🎬</div><h1>Watch Party</h1><p>Loading…</p></div></div>}>
+    <Suspense 
+      fallback={
+        <div className="min-h-[90vh] w-full flex items-center justify-center bg-[#07070a]">
+          <Loader2 className="w-8 h-8 text-violet-500 animate-spin" />
+        </div>
+      }
+    >
       <LobbyContent />
     </Suspense>
   );

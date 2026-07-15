@@ -2,6 +2,8 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import { motion, AnimatePresence } from 'framer-motion';
+import { User, Users, Tv, ShieldCheck, Mail, Globe, Calendar, Lock, Unlock, Settings, Trash2, Shield, UploadCloud, UserPlus, UserCheck, UserX, Loader2 } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { getFlagEmoji } from '../../components/NavBar';
 import { VerifiedBadge } from '../../components/VerifiedBadge';
@@ -25,8 +27,6 @@ const COUNTRIES = [
   { code: 'ZA', name: 'South Africa' },
   { code: 'MX', name: 'Mexico' },
 ];
-
-// Preset avatars removed to support custom user photo uploads.
 
 export default function ProfilePage() {
   const router = useRouter();
@@ -100,7 +100,7 @@ export default function ProfilePage() {
           setFriendRequests(pendingRequests);
         }
 
-        // Load my uploaded videos from database
+        // Load my uploaded videos
         const videosRes = await fetch('/api/videos', {
           headers: { 'Authorization': `Bearer ${token}` }
         });
@@ -181,7 +181,6 @@ export default function ProfilePage() {
         throw new Error(data.error || 'Failed to accept request');
       }
 
-      // Update local list
       setFriendRequests(prev => prev.filter(r => r.friendshipId !== requestId));
       window.location.reload();
     } catch (err) {
@@ -206,7 +205,6 @@ export default function ProfilePage() {
         throw new Error(data.error || 'Failed to decline request');
       }
 
-      // Update local list
       setFriendRequests(prev => prev.filter(r => r.friendshipId !== requestId));
     } catch (err) {
       alert('Error declining request: ' + err.message);
@@ -231,7 +229,6 @@ export default function ProfilePage() {
         throw new Error(data.error || 'Failed to remove friend');
       }
 
-      // Update local list
       setFriends(prev => prev.filter(f => f.friendshipId !== friendshipId));
     } catch (err) {
       alert('Error removing friend: ' + err.message);
@@ -258,7 +255,6 @@ export default function ProfilePage() {
         throw new Error(data.error || 'Failed to update video privacy');
       }
 
-      // Update local list
       setMyVideos(prev => prev.map(v => v.id === videoId ? { ...v, is_private: newStatus } : v));
     } catch (err) {
       alert('Error updating video status: ' + err.message);
@@ -283,7 +279,6 @@ export default function ProfilePage() {
         throw new Error(errData.error || 'Failed to delete video');
       }
 
-      // Update local list
       setMyVideos(prev => prev.filter(v => v.id !== videoId));
     } catch (err) {
       alert('Error deleting video: ' + err.message);
@@ -292,321 +287,397 @@ export default function ProfilePage() {
 
   if (loading) {
     return (
-      <div className="profile-container">
-        <div className="lobby-logo" style={{ textAlign: 'center', marginTop: '60px' }}>
-          <div className="logo-icon">👤</div>
-          <h1>Profile</h1>
-          <p>Loading details...</p>
-          <div className="spinner" style={{ margin: '20px auto' }} />
-        </div>
+      <div className="min-h-[85vh] w-full flex items-center justify-center bg-[#07070a]">
+        <Loader2 className="w-8 h-8 text-violet-500 animate-spin" />
       </div>
     );
   }
 
   return (
-    <div className="profile-container">
-      <div className="profile-header">
-        <div className="profile-summary">
+    <div className="max-w-4xl mx-auto px-6 py-12 bg-[#07070a] min-h-[90vh] flex flex-col gap-8">
+      {/* Profile Header Summary */}
+      <div className="p-6 rounded-3xl bg-zinc-900/20 border border-zinc-900 backdrop-blur-md relative overflow-hidden flex flex-col sm:flex-row items-center sm:items-start gap-6 select-none shadow-xl">
+        {/* Glow */}
+        <div className="absolute -right-20 -top-20 w-44 h-44 rounded-full bg-violet-600/10 blur-3xl pointer-events-none" />
+
+        {/* Avatar */}
+        <div className="flex-shrink-0 relative">
           {avatarUrl ? (
-            <img src={avatarUrl} alt="Avatar" className="profile-large-avatar" />
+            <img 
+              src={avatarUrl} 
+              alt="Avatar" 
+              className="w-24 h-24 rounded-3xl border-2 border-zinc-800 object-cover shadow-2xl" 
+            />
           ) : (
-            <div className="profile-large-avatar-placeholder">
-              {username.charAt(0).toUpperCase()}
+            <div className="w-24 h-24 rounded-3xl bg-zinc-800 flex items-center justify-center text-4xl font-black text-zinc-400 border border-zinc-800 uppercase shadow-inner">
+              {username.charAt(0)}
             </div>
           )}
-          <div className="profile-titles">
-            <h2>
-              {username} {profile?.is_verified && <VerifiedBadge size={16} />} {country && <span className="profile-flag-title">{getFlagEmoji(country)}</span>}
+        </div>
+
+        {/* Details summary */}
+        <div className="flex-1 text-center sm:text-left flex flex-col justify-center gap-2">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2 justify-center sm:justify-start">
+            <h2 className="text-2xl font-black text-white flex items-center gap-2.5 tracking-tight justify-center sm:justify-start">
+              {username}
+              {profile?.is_verified && <VerifiedBadge size={18} />}
             </h2>
-            <p>{user?.email}</p>
-            <div className="profile-badges">
-              <span className={`badge ${isPrivate ? 'badge-private' : 'badge-host'}`}>
-                {isPrivate ? '🔒 Private Profile' : '🌐 Public Profile'}
+            {country && (
+              <span className="text-lg bg-zinc-900 px-2 py-0.5 rounded-lg border border-zinc-800 inline-block self-center">
+                {getFlagEmoji(country)}
               </span>
-              <span className="badge badge-guest">{friends.length} Friends</span>
-              <span className="badge badge-guest">{myVideos.length} Videos</span>
-            </div>
+            )}
+          </div>
+
+          <p className="text-xs text-zinc-400 flex items-center gap-1.5 justify-center sm:justify-start">
+            <Mail className="w-3.5 h-3.5 text-zinc-500" />
+            <span>{user?.email}</span>
+          </p>
+
+          <div className="flex flex-wrap items-center justify-center sm:justify-start gap-2 mt-2">
+            <span className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold border flex items-center gap-1.5 ${
+              isPrivate 
+                ? 'bg-red-950/20 border-red-900/20 text-red-400' 
+                : 'bg-emerald-950/20 border-emerald-900/20 text-emerald-400'
+            }`}>
+              {isPrivate ? <Lock className="w-3 h-3" /> : <Unlock className="w-3 h-3" />}
+              <span>{isPrivate ? 'Private Profile' : 'Public Profile'}</span>
+            </span>
+
+            <span className="px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-[10px] font-bold text-zinc-400 flex items-center gap-1">
+              <Users className="w-3 h-3 text-zinc-500" />
+              <span>{friends.length} Friends</span>
+            </span>
+
+            <span className="px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-[10px] font-bold text-zinc-400 flex items-center gap-1">
+              <Tv className="w-3 h-3 text-zinc-500" />
+              <span>{myVideos.length} Videos</span>
+            </span>
           </div>
         </div>
       </div>
 
-      <div className="profile-card">
-        {/* Navigation Tabs */}
-        <div className="profile-tabs">
-          <button
-            className={`profile-tab ${activeTab === 'edit' ? 'active' : ''}`}
-            onClick={() => setActiveTab('edit')}
-          >
-            ✏️ Edit Profile
-          </button>
-          <button
-            className={`profile-tab ${activeTab === 'friends' ? 'active' : ''}`}
-            onClick={() => setActiveTab('friends')}
-          >
-            👥 Friends ({friends.length})
-            {friendRequests.length > 0 && <span className="tab-alert-dot" />}
-          </button>
-          <button
-            className={`profile-tab ${activeTab === 'videos' ? 'active' : ''}`}
-            onClick={() => setActiveTab('videos')}
-          >
-            🎬 My Videos ({myVideos.length})
-          </button>
+      {/* Tabs */}
+      <div className="flex flex-col gap-6">
+        <div className="w-full flex border-b border-zinc-900 gap-1.5">
+          {[
+            { id: 'edit', label: 'Edit Profile', icon: Settings },
+            { id: 'friends', label: 'Friends', icon: Users, badge: friendRequests.length },
+            { id: 'videos', label: 'My Videos', icon: Tv, badge: myVideos.length },
+          ].map(tab => {
+            const isActive = activeTab === tab.id;
+            const Icon = tab.icon;
+            return (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`relative px-4 py-3 text-xs font-semibold flex items-center gap-2 cursor-pointer transition-colors duration-150 ${
+                  isActive ? 'text-white' : 'text-zinc-500 hover:text-zinc-400'
+                }`}
+              >
+                <Icon className="w-4 h-4" />
+                <span>{tab.label}</span>
+                {tab.badge > 0 && (
+                  <span className="px-1.5 py-0.5 rounded-full bg-violet-600 text-white text-[9px] font-extrabold animate-pulse">
+                    {tab.badge}
+                  </span>
+                )}
+                {isActive && (
+                  <motion.div
+                    layoutId="profile-tab-bar"
+                    className="absolute bottom-0 left-0 right-0 h-[2px] bg-violet-500"
+                    transition={{ type: 'spring', stiffness: 380, damping: 30 }}
+                  />
+                )}
+              </button>
+            );
+          })}
         </div>
 
-        {/* Tab Content: Edit Profile */}
-        {activeTab === 'edit' && (
-          <form onSubmit={handleUpdateProfile} className="profile-form">
-            {message.text && (
-              <div className={`auth-message ${message.type}`}>
-                {message.type === 'error' ? '⚠️' : '✅'} {message.text}
-              </div>
-            )}
-
-            <div className="input-group">
-              <label className="input-label">Username</label>
-              <input
-                type="text"
-                className="input-field"
-                required
-                maxLength={20}
-                value={username}
-                onChange={(e) => setUsername(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''))}
-              />
-            </div>
-
-            <div className="input-group">
-              <label className="input-label">Profile Picture</label>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '16px', marginTop: '8px' }}>
-                {avatarUrl ? (
-                  <img src={avatarUrl} alt="Preview" className="profile-large-avatar" style={{ margin: 0, width: '64px', height: '64px' }} />
-                ) : (
-                  <div className="profile-large-avatar-placeholder" style={{ margin: 0, width: '64px', height: '64px', fontSize: '1.5rem' }}>
-                    {username.charAt(0).toUpperCase()}
+        {/* Tab Content Cards */}
+        <div className="bg-zinc-900/35 border border-zinc-800/60 p-6 rounded-3xl backdrop-blur-md min-h-[300px]">
+          <AnimatePresence mode="wait">
+            {activeTab === 'edit' && (
+              <motion.form 
+                key="edit"
+                initial={{ opacity: 0, y: 5 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -5 }}
+                onSubmit={handleUpdateProfile} 
+                className="flex flex-col gap-5"
+              >
+                {message.text && (
+                  <div className={`p-3 rounded-xl border text-xs ${
+                    message.type === 'error'
+                      ? 'bg-red-950/20 border-red-900/30 text-red-400'
+                      : 'bg-emerald-950/20 border-emerald-900/30 text-emerald-400'
+                  }`}>
+                    {message.type === 'error' ? '⚠️ ' : '✅ '} {message.text}
                   </div>
                 )}
-                
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <input
-                    type="file"
-                    accept="image/*"
-                    id="avatar-upload-input"
-                    style={{ display: 'none' }}
-                    onChange={async (e) => {
-                      const file = e.target.files?.[0];
-                      if (!file) return;
 
-                      // Read file as base64
-                      const reader = new FileReader();
-                      reader.onload = async () => {
-                        try {
-                          const base64Data = reader.result;
-                          const session = await supabase.auth.getSession();
-                          const token = session.data.session?.access_token;
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-xs font-semibold text-zinc-400">Username</label>
+                    <input
+                      type="text"
+                      className="w-full px-4 py-2.5 rounded-xl bg-zinc-950 border border-zinc-800 text-zinc-200 focus:outline-none focus:border-violet-600 text-sm transition-all"
+                      required
+                      maxLength={20}
+                      value={username}
+                      onChange={(e) => setUsername(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''))}
+                    />
+                  </div>
 
-                          const res = await fetch('/api/profile/upload-avatar', {
-                            method: 'POST',
-                            headers: {
-                              'Content-Type': 'application/json',
-                              'Authorization': `Bearer ${token}`
-                            },
-                            body: JSON.stringify({
-                              data: base64Data,
-                              filename: file.name,
-                              contentType: file.type
-                            })
-                          });
-
-                          if (!res.ok) {
-                            const err = await res.json();
-                            throw new Error(err.error || 'Failed to upload avatar');
-                          }
-
-                          const data = await res.json();
-                          setAvatarUrl(data.url);
-                          setMessage({ type: 'success', text: 'Avatar uploaded successfully! Click save to apply changes.' });
-                        } catch (err) {
-                          setMessage({ type: 'error', text: err.message });
-                        }
-                      };
-                      reader.readAsDataURL(file);
-                    }}
-                  />
-                  <button
-                    type="button"
-                    className="btn btn-secondary btn-sm"
-                    onClick={() => document.getElementById('avatar-upload-input').click()}
-                  >
-                    📷 Upload Custom Photo
-                  </button>
-                  <span className="input-hint">JPG, PNG or WEBP (Max 5MB)</span>
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-xs font-semibold text-zinc-400">Country</label>
+                    <select
+                      className="w-full px-3 py-2.5 rounded-xl bg-zinc-950 border border-zinc-800 text-zinc-200 focus:outline-none focus:border-violet-600 text-sm transition-all cursor-pointer"
+                      value={country}
+                      onChange={(e) => setCountry(e.target.value)}
+                    >
+                      {COUNTRIES.map(c => (
+                        <option key={c.code} value={c.code}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
-              </div>
-            </div>
 
-            <div className="input-row" style={{ display: 'flex', gap: '20px' }}>
-              <div className="input-group" style={{ flex: 1 }}>
-                <label className="input-label">Country</label>
-                <select
-                  className="input-field"
-                  value={country}
-                  onChange={(e) => setCountry(e.target.value)}
-                  style={{ height: '42px', backgroundColor: '#13131a', border: '1px solid #222', borderRadius: '6px', color: '#fff' }}
-                >
-                  {COUNTRIES.map(c => (
-                    <option key={c.code} value={c.code}>
-                      {getFlagEmoji(c.code)} {c.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                  <div className="flex flex-col gap-1.5">
+                    <label className="text-xs font-semibold text-zinc-400">Date of Birth</label>
+                    <input
+                      type="date"
+                      className="w-full px-4 py-2.5 rounded-xl bg-zinc-950 border border-zinc-800 text-zinc-200 focus:outline-none focus:border-violet-600 text-sm transition-all"
+                      value={dob}
+                      onChange={(e) => setDob(e.target.value)}
+                    />
+                  </div>
 
-              <div className="input-group" style={{ flex: 1 }}>
-                <label className="input-label">Date of Birth</label>
-                <input
-                  type="date"
-                  className="input-field"
-                  value={dob}
-                  onChange={(e) => setDob(e.target.value)}
-                />
-              </div>
-            </div>
-
-            <div className="privacy-toggle-group">
-              <div className="privacy-toggle-text">
-                <strong>Private Profile</strong>
-                <p>When private, only accepted friends can watch your shared video uploads.</p>
-              </div>
-              <div
-                className={`toggle-switch ${isPrivate ? 'active' : ''}`}
-                onClick={() => setIsPrivate(!isPrivate)}
-              />
-            </div>
-
-            <button className="btn btn-primary" type="submit" disabled={saveLoading} style={{ marginTop: '20px' }}>
-              {saveLoading ? <div className="spinner-small" /> : '💾 Save Profile'}
-            </button>
-          </form>
-        )}
-
-        {/* Tab Content: Friends & Requests */}
-        {activeTab === 'friends' && (
-          <div className="friends-section">
-            {/* Friend Requests */}
-            <div className="friend-sub-section">
-              <h3>Incoming Friend Requests ({friendRequests.length})</h3>
-              {friendRequests.length === 0 ? (
-                <div className="notice-empty">No pending friend requests</div>
-              ) : (
-                <div className="requests-list">
-                  {friendRequests.map(r => (
-                    <div key={r.id} className="social-user-item">
-                      <div className="social-user-info">
-                        {r.avatar_url ? (
-                          <img src={r.avatar_url} alt="Avatar" className="social-avatar" />
-                        ) : (
-                          <div className="social-avatar-placeholder">{r.username.charAt(0).toUpperCase()}</div>
-                        )}
-                        <span className="social-username">
-                          {r.username} {r.country && getFlagEmoji(r.country)}
-                        </span>
-                      </div>
-                      <div className="social-actions">
-                        <button
-                          className="btn btn-primary btn-sm"
-                          onClick={() => handleAcceptRequest(r.friendshipId, r.username)}
-                        >
-                          Accept
-                        </button>
-                        <button
-                          className="btn btn-secondary btn-sm"
-                          onClick={() => handleDeclineRequest(r.friendshipId)}
-                        >
-                          Decline
-                        </button>
-                      </div>
-                    </div>
-                  ))}
+                  <div className="flex flex-col gap-1.5 justify-center">
+                    <label className="text-xs font-semibold text-zinc-400 mb-1">Privacy Scope</label>
+                    <label className="flex items-center gap-3 cursor-pointer py-1.5 select-none">
+                      <input
+                        type="checkbox"
+                        checked={isPrivate}
+                        onChange={(e) => setIsPrivate(e.target.checked)}
+                        className="w-[18px] h-[18px] rounded border-zinc-800 bg-zinc-950 text-violet-600 focus:ring-violet-600 cursor-pointer"
+                      />
+                      <span className="text-xs text-zinc-300 font-medium">Make profile private (friends only)</span>
+                    </label>
+                  </div>
                 </div>
-              )}
-            </div>
 
-            {/* Friends list */}
-            <div className="friend-sub-section" style={{ marginTop: '40px' }}>
-              <h3>My Friends ({friends.length})</h3>
-              {friends.length === 0 ? (
-                <div className="notice-empty">You haven&apos;t added any friends yet. Use Search tab to find them!</div>
-              ) : (
-                <div className="requests-list">
-                  {friends.map(f => (
-                    <div key={f.id} className="social-user-item">
-                      <div className="social-user-info">
-                        {f.avatar_url ? (
-                          <img src={f.avatar_url} alt="Avatar" className="social-avatar" />
-                        ) : (
-                          <div className="social-avatar-placeholder">{f.username.charAt(0).toUpperCase()}</div>
-                        )}
-                        <span className="social-username">
-                          {f.username} {f.country && getFlagEmoji(f.country)}
-                        </span>
+                {/* Avatar upload */}
+                <div className="flex flex-col gap-2.5 mt-2 pt-4 border-t border-zinc-900/60">
+                  <label className="text-xs font-semibold text-zinc-400">Avatar Image</label>
+                  <div className="flex items-center gap-5">
+                    {avatarUrl ? (
+                      <img src={avatarUrl} alt="Avatar" className="w-14 h-14 rounded-2xl object-cover border border-zinc-800 shadow" />
+                    ) : (
+                      <div className="w-14 h-14 rounded-2xl bg-zinc-800 flex items-center justify-center text-xl font-bold border border-zinc-800 uppercase text-zinc-400">
+                        {username.charAt(0)}
                       </div>
-                      <button
-                        className="btn btn-secondary btn-sm"
-                        onClick={() => handleUnfriend(f.friendshipId)}
-                      >
-                        Unfriend
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Tab Content: My Videos */}
-        {activeTab === 'videos' && (
-          <div className="profile-videos-section">
-            <h3>My Shared Videos ({myVideos.length})</h3>
-            <p style={{ color: 'var(--text-muted)', fontSize: '13px', marginBottom: '20px' }}>
-              Control visibility permissions for each of your uploaded video files.
-            </p>
-
-            {myVideos.length === 0 ? (
-              <div className="notice-empty">You haven&apos;t uploaded any videos yet. Go to Lobby and click Upload!</div>
-            ) : (
-              <div className="my-videos-list">
-                {myVideos.map(v => (
-                  <div key={v.id} className="my-video-item">
-                    <div className="my-video-info">
-                      <span className="my-video-icon">🎬</span>
-                      <div className="my-video-details">
-                        <strong className="my-video-title">{v.display_name}</strong>
-                        <span className="my-video-meta">Uploaded: {new Date(v.created_at).toLocaleDateString()}</span>
-                      </div>
-                    </div>
+                    )}
                     
-                    <div className="my-video-actions">
-                      <button
-                        className={`btn ${v.is_private ? 'btn-secondary' : 'btn-primary'} btn-sm`}
-                        onClick={() => handleToggleVideoPrivacy(v.id, v.is_private)}
-                        title={v.is_private ? 'Change to Public' : 'Change to Private'}
-                      >
-                        {v.is_private ? '🔒 Private' : '🌐 Public'}
-                      </button>
-                      <button
-                        className="btn btn-danger btn-sm"
-                        onClick={() => handleDeleteVideo(v.id, v.filename)}
-                      >
-                        🗑️ Delete
-                      </button>
+                    <label className="flex items-center gap-1.5 px-4 py-2 rounded-xl border border-zinc-800 hover:bg-zinc-800 text-xs font-semibold text-zinc-300 hover:text-white cursor-pointer transition-colors">
+                      <UploadCloud className="w-4 h-4 text-violet-400" />
+                      <span>Upload Photo</span>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={async (e) => {
+                          const file = e.target.files?.[0];
+                          if (!file) return;
+                          const reader = new FileReader();
+                          reader.onloadend = () => {
+                            setAvatarUrl(reader.result);
+                          };
+                          reader.readAsDataURL(file);
+                        }}
+                      />
+                    </label>
+                  </div>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={saveLoading}
+                  className="w-full mt-4 py-3 rounded-xl bg-violet-600 hover:bg-violet-500 active:scale-[0.98] text-white font-semibold text-sm transition-all flex items-center justify-center gap-2 cursor-pointer shadow-lg shadow-violet-900/25"
+                >
+                  {saveLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Save Profile Changes'}
+                </button>
+              </motion.form>
+            )}
+
+            {/* Tab: Friends list */}
+            {activeTab === 'friends' && (
+              <motion.div 
+                key="friends"
+                initial={{ opacity: 0, y: 5 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -5 }}
+                className="flex flex-col gap-6"
+              >
+                {/* Pending requests */}
+                {friendRequests.length > 0 && (
+                  <div className="flex flex-col gap-3 pb-6 border-b border-zinc-900">
+                    <h4 className="text-xs font-bold uppercase tracking-wider text-violet-400">
+                      Pending Inbound Requests ({friendRequests.length})
+                    </h4>
+                    <div className="flex flex-col gap-2">
+                      {friendRequests.map(req => (
+                        <div key={req.id} className="flex items-center justify-between p-3.5 rounded-2xl bg-zinc-950 border border-zinc-900">
+                          <div className="flex items-center gap-3">
+                            <span className="w-8 h-8 rounded-full bg-zinc-800 flex items-center justify-center text-xs font-bold text-zinc-300">
+                              {req.username.charAt(0).toUpperCase()}
+                            </span>
+                            <div className="flex flex-col">
+                              <span className="text-xs font-bold text-white flex items-center gap-1">
+                                {req.username}
+                                {req.country && getFlagEmoji(req.country)}
+                              </span>
+                            </div>
+                          </div>
+                          
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => handleAcceptRequest(req.friendshipId, req.username)}
+                              className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-violet-600 hover:bg-violet-600 text-white text-[11px] font-bold cursor-pointer active:scale-95 transition-all"
+                            >
+                              <UserCheck className="w-3.5 h-3.5" />
+                              <span>Accept</span>
+                            </button>
+                            <button
+                              onClick={() => handleDeclineRequest(req.friendshipId)}
+                              className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-400 hover:text-red-400 text-[11px] font-semibold cursor-pointer transition-colors"
+                            >
+                              <UserX className="w-3.5 h-3.5" />
+                              <span>Decline</span>
+                            </button>
+                          </div>
+                        </div>
+                      ))}
                     </div>
                   </div>
-                ))}
-              </div>
+                )}
+
+                {/* Active Friends */}
+                <div className="flex flex-col gap-3">
+                  <h4 className="text-xs font-bold uppercase tracking-wider text-zinc-400">
+                    My Friends ({friends.length})
+                  </h4>
+                  {friends.length === 0 ? (
+                    <div className="text-center py-10 text-zinc-500 text-xs bg-zinc-950/20 border border-zinc-900/60 rounded-2xl">
+                      Your friends list is currently empty.
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      {friends.map(friend => (
+                        <div key={friend.id} className="flex items-center justify-between p-3 rounded-2xl bg-zinc-950 border border-zinc-900">
+                          <div className="flex items-center gap-2.5">
+                            {friend.avatar_url ? (
+                              <img src={friend.avatar_url} alt={friend.username} className="w-9 h-9 rounded-full object-cover border border-zinc-800" />
+                            ) : (
+                              <div className="w-9 h-9 rounded-full bg-zinc-800 flex items-center justify-center text-xs font-bold text-zinc-400 uppercase">
+                                {friend.username.charAt(0)}
+                              </div>
+                            )}
+                            <div className="flex flex-col">
+                              <span className="text-xs font-bold text-white flex items-center gap-1">
+                                {friend.username}
+                                {friend.isVerified && <VerifiedBadge size={12} />}
+                                {friend.country && getFlagEmoji(friend.country)}
+                              </span>
+                              <span className="text-[9px] text-zinc-500 font-medium">{friend.is_private ? '🔒 Private' : '🌐 Public'}</span>
+                            </div>
+                          </div>
+
+                          <button
+                            onClick={() => handleUnfriend(friend.friendshipId)}
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-[10px] font-bold text-zinc-400 hover:text-red-400 cursor-pointer transition-colors"
+                          >
+                            <UserMinus className="w-3 h-3" />
+                            <span>Remove</span>
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </motion.div>
             )}
-          </div>
-        )}
+
+            {/* Tab: My Videos */}
+            {activeTab === 'videos' && (
+              <motion.div 
+                key="videos"
+                initial={{ opacity: 0, y: 5 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -5 }}
+                className="flex flex-col gap-4"
+              >
+                <div className="flex justify-between items-center pb-2">
+                  <h4 className="text-xs font-bold uppercase tracking-wider text-zinc-400">
+                    Uploaded Videos ({myVideos.length})
+                  </h4>
+                </div>
+
+                {myVideos.length === 0 ? (
+                  <div className="text-center py-10 text-zinc-500 text-xs bg-zinc-950/20 border border-zinc-900/60 rounded-2xl">
+                    You have not uploaded any videos yet.
+                  </div>
+                ) : (
+                  <div className="flex flex-col gap-3">
+                    {myVideos.map(video => (
+                      <div 
+                        key={video.id} 
+                        className="flex flex-col sm:flex-row sm:items-center justify-between p-4 rounded-2xl bg-zinc-950 border border-zinc-900 gap-4"
+                      >
+                        <div className="flex items-start gap-3 min-w-0">
+                          <span className="text-2xl mt-0.5">🎬</span>
+                          <div className="flex flex-col min-w-0">
+                            <span className="text-sm font-semibold text-zinc-200 truncate">{video.display_name}</span>
+                            <span className="text-[10px] text-zinc-500 font-mono mt-0.5 truncate">{video.filename}</span>
+                            <span className="text-[9px] text-zinc-600 mt-1">Uploaded {new Date(video.created_at).toLocaleDateString()}</span>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-3 self-end sm:self-center">
+                          {/* Privacy Toggle Button */}
+                          <button
+                            onClick={() => handleToggleVideoPrivacy(video.id, video.is_private)}
+                            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border text-[10px] font-bold transition-all cursor-pointer ${
+                              video.is_private
+                                ? 'bg-red-950/25 border-red-900/30 text-red-400 hover:bg-red-950/40'
+                                : 'bg-emerald-950/25 border-emerald-900/30 text-emerald-400 hover:bg-emerald-950/40'
+                            }`}
+                            title={video.is_private ? 'Friends Only' : 'Public'}
+                          >
+                            {video.is_private ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
+                            <span>{video.is_private ? 'Private' : 'Public'}</span>
+                          </button>
+
+                          {/* Delete Button */}
+                          <button
+                            onClick={() => handleDeleteVideo(video.id, video.filename)}
+                            className="p-2 rounded-xl bg-zinc-900 hover:bg-red-950/20 border border-zinc-800 hover:border-red-900/30 text-zinc-400 hover:text-red-400 transition-all cursor-pointer"
+                            title="Delete Video"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
       </div>
     </div>
   );
