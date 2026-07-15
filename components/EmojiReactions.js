@@ -16,7 +16,7 @@ export function useEmojiSpawner(canvasRef) {
     el.textContent = emoji;
     el.style.left = (5 + Math.random() * 82) + '%';
     el.style.setProperty('--spin', (Math.random() * 60 - 30) + 'deg');
-    el.style.setProperty('--fly-duration', (2.2 + Math.random() * 1.2) + 's');
+    el.style.setProperty('--fly-duration', (3.5 + Math.random() * 1.5) + 's'); // slow float, not a launch
     canvas.appendChild(el);
     el.addEventListener('animationend', () => el.remove());
   }, [canvasRef]);
