@@ -55,6 +55,7 @@ export default function UploadPage() {
   const fileInputRef = useRef(null);
   const abortRef = useRef(false);
   const startTimeRef = useRef(0);
+  const activeXhrsRef = useRef(new Set());
 
   // Authenticate user on load
   useEffect(() => {
@@ -234,30 +235,69 @@ export default function UploadPage() {
       const allPartNumbers = Array.from({ length: totalChunks }, (_, i) => i + 1);
       const partUrls = await signParts(allPartNumbers);
 
-      // 3. Upload parts in parallel directly to S3, with per-part retry
+      // 3. Upload parts in parallel directly to S3, with per-part retry.
+      // XHR (not fetch) so we get byte-level upload progress and real abort.
       const completedParts = [];
-      let uploadedTotal = 0;
+      const partLoaded = {}; // partNumber -> bytes sent for in-flight parts
+      let completedBytes = 0;
       let nextIndex = 0;
+      let lastUiUpdate = 0;
+
+      const updateProgress = (force = false) => {
+        const now = Date.now();
+        if (!force && now - lastUiUpdate < 200) return;
+        lastUiUpdate = now;
+        const inFlight = Object.values(partLoaded).reduce((a, b) => a + b, 0);
+        const total = Math.min(completedBytes + inFlight, file.size);
+        setUploadedBytes(total);
+        setProgress(Math.round((total / file.size) * 100));
+        const elapsed = (now - startTimeRef.current) / 1000;
+        const bytesPerSec = elapsed > 0 ? total / elapsed : 0;
+        setSpeed(bytesPerSec);
+        setEta(bytesPerSec > 0 ? (file.size - total) / bytesPerSec : null);
+      };
+
+      const putPart = (url, chunk, partNumber) => new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        activeXhrsRef.current.add(xhr);
+        xhr.open('PUT', url);
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) {
+            partLoaded[partNumber] = e.loaded;
+            updateProgress();
+          }
+        };
+        xhr.onload = () => {
+          activeXhrsRef.current.delete(xhr);
+          if (xhr.status >= 200 && xhr.status < 300) {
+            const eTag = xhr.getResponseHeader('ETag');
+            if (!eTag) return reject(new Error(`S3 response missing ETag header for part ${partNumber}`));
+            resolve(eTag.replace(/"/g, ''));
+          } else {
+            reject(new Error(`Failed to upload part ${partNumber} to S3 (${xhr.status})`));
+          }
+        };
+        xhr.onerror = () => {
+          activeXhrsRef.current.delete(xhr);
+          reject(new Error(`Network error uploading part ${partNumber}`));
+        };
+        xhr.onabort = () => {
+          activeXhrsRef.current.delete(xhr);
+          reject(new Error('Upload cancelled'));
+        };
+        xhr.send(chunk);
+      });
 
       const uploadPart = async (partNumber, attempt = 0) => {
         const start = (partNumber - 1) * MULTIPART_CHUNK_SIZE;
         const end = Math.min(start + MULTIPART_CHUNK_SIZE, file.size);
         const chunk = file.slice(start, end);
         try {
-          const uploadResponse = await fetch(partUrls[partNumber], {
-            method: 'PUT',
-            body: chunk
-          });
-          if (!uploadResponse.ok) {
-            throw new Error(`Failed to upload part ${partNumber} to S3 (${uploadResponse.status})`);
-          }
-          const eTag = uploadResponse.headers.get('ETag');
-          if (!eTag) {
-            throw new Error(`S3 response missing ETag header for part ${partNumber}`);
-          }
-          return { PartNumber: partNumber, ETag: eTag.replace(/"/g, ''), size: end - start };
+          const eTag = await putPart(partUrls[partNumber], chunk, partNumber);
+          return { PartNumber: partNumber, ETag: eTag, size: end - start };
         } catch (err) {
           if (attempt < PART_MAX_RETRIES && !abortRef.current) {
+            partLoaded[partNumber] = 0;
             // Re-sign this part (URL may have expired) and retry with backoff
             await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
             try {
@@ -275,16 +315,12 @@ export default function UploadPage() {
           if (abortRef.current) return;
           const i = nextIndex++;
           if (i >= totalChunks) return;
-          const part = await uploadPart(i + 1);
+          const partNumber = i + 1;
+          const part = await uploadPart(partNumber);
           completedParts.push({ PartNumber: part.PartNumber, ETag: part.ETag });
-
-          uploadedTotal += part.size;
-          setUploadedBytes(uploadedTotal);
-          setProgress(Math.round((uploadedTotal / file.size) * 100));
-          const elapsed = (Date.now() - startTimeRef.current) / 1000;
-          const bytesPerSec = elapsed > 0 ? uploadedTotal / elapsed : 0;
-          setSpeed(bytesPerSec);
-          setEta(bytesPerSec > 0 ? (file.size - uploadedTotal) / bytesPerSec : null);
+          delete partLoaded[partNumber];
+          completedBytes += part.size;
+          updateProgress(true);
         }
       };
 
@@ -345,6 +381,9 @@ export default function UploadPage() {
 
   function handleCancel() {
     abortRef.current = true;
+    // Kill in-flight part uploads immediately instead of letting 100MB PUTs drain
+    activeXhrsRef.current.forEach(xhr => { try { xhr.abort(); } catch {} });
+    activeXhrsRef.current.clear();
     setUploadState('idle');
     setProgress(0);
   }
