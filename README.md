@@ -1,299 +1,261 @@
 # 🎬 Watch Party (v2.0.0)
 
-A Netflix-style synchronized watch party web application built with **Next.js**, **Express**, **Socket.io**, and **AWS S3** integration. Users can join sync-locked rooms to chat, react, and watch videos together with real-time play, pause, and seek synchronization.
+Watch videos with your friends in perfect sync, argue about what to watch in the chat, and throw flying emojis at the screen — all without anyone shouting "wait pause PAUSE" into a group call.
+
+Built with **Next.js 15**, **Express**, **Socket.io**, **DynamoDB**, **S3**, and **AWS MediaConvert**. Runs happily on a free-tier EC2 instance, because we learned the hard way what happens when it doesn't (see [War Stories](#-war-stories-aka-troubleshooting)).
 
 ---
 
-## 🚀 Key Features
+## 🚀 Features
 
-* **Real-time Synchronized Playback**: Play, pause, and seek actions are instantly synchronized across all users in a room using Socket.io.
-* **Host & Guest Controls**: The first user to join a room becomes the host. The host can toggle guest controls to allow or restrict guests from controlling video playback.
-* **AWS S3 & Local Video Storage**: Easily switch between streaming videos from an AWS S3 bucket or a local `./videos` folder.
-* **YouTube-Style Feed Grid**: A beautiful, responsive card layout grid displaying custom thumbnails, uploader avatars, creator names, country flags, and verified badges.
-* **Decoupled S3 Asset Storage**: Automatically uploads and serves static assets (user profile avatars and custom video thumbnails) to S3 when configured, even if videos are stored/streamed locally.
-* **Twitter-Style Verified Badges**: Uses a sleek inline Twitter-style blue tick SVG badge for verified creators in NavBar tooltips, search results, profile cards, explore feed, and room selectors.
-* **Correct Chat Username Order**: Messages inside the room chat render usernames and badges dynamically in the correct order: `[Username] [Flag] [Verified SVG Badge]`.
-* **Multi-Format Streaming Support**: Presigned URLs automatically override headers for formats like Matroska (`.mkv`), `.mp4`, `.webm`, `.mov`, and `.avi` to maximize browser compatibility.
-* **Real-time Chat & Reactions**: Text chat with system notifications (e.g., joins/leaves) and emoji reactions.
-* **Responsive Mobile Design**: Tailored CSS structure ensuring full access to video, chat, and room controls on mobile and tablet screens.
+* **Real-time synchronized playback** — play, pause, and seek are broadcast to everyone in the room. If the host sneezes on the spacebar, everybody pauses.
+* **Host & guest controls** — first person in the room is the host 👑. Host can lock playback controls; locked-out guests can *politely request* a play/pause/skip, which the host approves or rejects like a tiny bouncer.
+* **Background uploads** 🆕 — start an upload, then wander off to watch something else *in the same tab*. Upload several files at once. A status list on the upload page shows progress, speed, ETA, and transcode percent for each. (Reloading the tab kills uploads — browsers are like that. You'll get a warning first.)
+* **Direct-to-S3 multipart uploads** — your video travels browser → S3 in 100MB parts, 4 in parallel. The server never touches a single video byte. It just signs URLs and feels important.
+* **Serverless HLS transcoding** — AWS MediaConvert chops videos into 4-second segments for smooth streaming. Your EC2 does none of this work. It has one vCPU and a dream, and we protect both.
+* **Auth & profiles** — email/password (bcrypt), JWT sessions, custom avatars, country flags 🇮🇳, private accounts, and Twitter-style verified badges for the chosen ones.
+* **Friends system** — send/accept/decline requests. Private users' videos are visible to friends only.
+* **Feed** — YouTube-style grid of public uploads with thumbnails. One click starts a watch party.
+* **Chat & reactions** — room chat with join/leave notifications, plus emoji that fly across the video like confetti with commitment issues.
+* **Fullscreen niceties** — auto-hiding controls, chat notifications overlaid in fullscreen, fake-fullscreen fallback for stubborn browsers.
+
+---
+
+## 🧠 Architecture (or: Why the Server Is So Relaxed)
+
+The golden rule of this codebase: **video bytes never pass through the EC2 instance.** Every time we broke this rule, the server died. We stopped breaking it.
+
+```
+UPLOAD                                          PLAYBACK
+──────                                          ────────
+Browser ──(100MB parts, ×4 parallel)──► S3     Browser ──► GET /api/video-url
+   │                                               │
+   └─► server: sign URLs, complete,                ├─ HLS exists?  .m3u8 manifest proxied (tiny),
+       write DynamoDB record                       │   .ts segments 302-redirect to presigned S3
+   │                                               │   (bytes: S3 ──► browser, server watches)
+MediaConvert ──► HLS segments ──► S3               └─ No HLS yet?  presigned raw URL
+   (server polls job status, logs errors)             (video is watchable immediately;
+                                                        upgrades to HLS when the job finishes)
+```
+
+The video's DynamoDB record is written the moment S3 assembly completes — so a freshly uploaded video is instantly watchable as a raw file, and silently upgrades itself to HLS when MediaConvert finishes. If MediaConvert fails (looking at you, MKV with DTS audio), the video just stays raw. No drama.
 
 ---
 
 ## 🛠️ Tech Stack
 
-* **Frontend**: Next.js 15 (React 19), TailwindCSS (if configured) or Custom Responsive CSS
-* **Backend**: Node.js, Express, Socket.io
-* **Storage/Hosting**: AWS S3 (Video assets), AWS EC2 (Application server)
-* **Process Manager**: PM2
+| Layer | Thing | Why |
+|---|---|---|
+| Frontend | Next.js 15, React 19, Tailwind CSS, framer-motion, lucide-react | It's 2026 |
+| Realtime | Socket.io | Rooms, sync, chat, flying emoji transport |
+| Backend | Node.js + Express (custom server) | One process, one `server.js`, zero microservices |
+| Database | DynamoDB | Users, friendships, video metadata |
+| Storage | S3 | Videos, HLS segments, avatars, thumbnails |
+| Transcoding | AWS MediaConvert | So the EC2 doesn't have to (it can't) |
+| Streaming | hls.js | 4-second segments, buffers ~90s ahead |
+| Process manager | PM2 | Turns crashes into restarts |
 
 ---
 
 ## 📁 Project Structure
 
 ```text
-├── app/                  # Next.js App Router (pages and layouts)
-├── components/           # Reusable React components (Player, Chat, etc.)
-├── videos/               # Local video directory (fallback / local dev)
-├── server.js             # Express entrypoint & Socket.io handler
-├── test-s3.js            # AWS S3 connectivity test script
-├── package.json          # Node dependencies and scripts
-└── .env.local            # Environment variables configuration
+├── app/                    # Next.js App Router pages
+│   ├── auth/               # Login / register
+│   ├── feed/               # Public video grid
+│   ├── search/             # Find friends
+│   ├── profile/            # Profile, friends, my videos
+│   ├── upload/             # Upload form + background task list
+│   └── room/[roomId]/      # The main event
+├── components/             # VideoPlayer, ChatPanel, NavBar, etc.
+├── lib/
+│   ├── uploadManager.js    # Module-level upload brain — survives page navigation
+│   ├── socket.js           # Shared Socket.io client
+│   └── supabase.js         # Mock Supabase client wrapping our own JWT auth (long story)
+├── server.js               # Express + Socket.io + all API routes (~1.9k lines of honest work)
+└── .env.local              # Secrets go here, not in git, we beg you
 ```
 
 ---
 
-## 💻 Local Setup & Development
+## 💻 Local Development
 
 ### 1. Prerequisites
-* **Node.js (v18+)**
-* **FFmpeg**: Required to convert uploaded videos into Netflix-style HLS (HTTP Live Streaming) format for lag-free synchronized playback.
+* **Node.js v18+**
+* An AWS account (DynamoDB is required even locally — auth lives there)
+* FFmpeg is **not** required anymore. We fired it. MediaConvert took its job.
 
-### 2. Install Dependencies
+### 2. Install & configure
+
 ```bash
 npm install
 ```
 
-### 3. Configure Environment Variables
-Create a `.env.local` file in the root directory:
+Create `.env.local`:
+
 ```env
 PORT=3000
-VIDEO_SOURCE=local  # Or 's3' (Video streaming storage source)
+JWT_SECRET=pick-something-long-and-random-not-this
+VIDEO_SOURCE=s3                          # 'local' works for ./videos folder testing
 AWS_REGION=ap-south-1
-S3_BUCKET_NAME=watchpartyapp-online-1234
-AWS_ACCESS_KEY_ID=your_access_key       # Required for local development S3 access
-AWS_SECRET_ACCESS_KEY=your_secret_key   # Required for local development S3 access
-
+S3_BUCKET_NAME=your-bucket-name
+AWS_ACCESS_KEY_ID=your_access_key
+AWS_SECRET_ACCESS_KEY=your_secret_key
+AWS_MEDIACONVERT_ROLE_ARN=arn:aws:iam::123456789:role/MediaConvertRole
 ```
 
-### 4. Start Development Server
+⚠️ **Set `JWT_SECRET`.** There is a fallback default in the code and it is exactly as secure as leaving your house key under a mat labeled "KEY UNDER HERE".
+
+### 3. Run
+
 ```bash
 npm run dev
 ```
-Open [http://localhost:3000](http://localhost:3000) in your browser.
+
+Open [http://localhost:3000](http://localhost:3000), register an account, upload something short, feel powerful.
 
 ---
 
-## ☁️ Complete AWS Setup & Deployment Guide
+## ☁️ AWS Setup
 
-This guide walks you through deploying the application on **AWS EC2** using **PM2** for process management and **AWS S3** for secure, scalable video streaming.
+### 1. DynamoDB Tables (create these three)
 
-### Part 1: Configure AWS S3
+| Table | Partition key | Sort key | GSI |
+|---|---|---|---|
+| `watch_party_users` | `email` (S) | — | `username-index` on `username` |
+| `watch_party_friendships` | `senderId` (S) | `receiverId` (S) | `receiverId-index` on `receiverId` |
+| `watch_party_videos` | `filename` (S) | — | — |
 
-Create an S3 bucket (e.g., `watchpartyapp-online-1234`). The application automatically organizes files in the bucket using the following folder structure:
-- `videos/` - Holds raw video files (e.g., `videos/my-video.mp4`)
-- `videos/hls/` - Holds HLS segment directories (e.g., `videos/hls/my-video/`)
-- `avatars/` - Holds uploaded custom user profile avatars (e.g., `avatars/user-123.jpg`)
-- `thumbnails/` - Holds uploaded custom video thumbnails (e.g., `thumbnails/user-123.jpg`)
+On-demand capacity mode. This app's traffic will not trouble DynamoDB. DynamoDB will not notice this app exists.
 
-*(Note: Custom user avatars and video thumbnails are automatically stored/served from these S3 folders if `S3_BUCKET_NAME` is configured, regardless of whether `VIDEO_SOURCE` is set to `local` or `s3` for video streaming).*
+### 2. S3 Bucket
 
-#### 2. Set Up CORS Policy
-To allow your web application to request video streams from S3, you must configure CORS on the bucket:
-1. Go to your S3 bucket in the **AWS Console**.
-2. Select the **Permissions** tab.
-3. Scroll down to **Cross-origin resource sharing (CORS)** and paste this configuration:
+The app organizes the bucket like a responsible adult:
+
+```
+videos/               raw uploads
+videos/hls/<name>/    MediaConvert output (manifests + segments)
+avatars/              profile pictures
+thumbnails/           video thumbnails
+```
+
+#### CORS — get this right or nothing works
+
+The browser talks to S3 directly for **both** uploads (PUT, and it must read the `ETag` header back) **and** HLS playback (GET, via redirects). Bucket → Permissions → CORS:
+
 ```json
 [
     {
-        "AllowedHeaders": [
-            "*"
-        ],
-        "AllowedMethods": [
-            "GET",
-            "HEAD"
-        ],
-        "AllowedOrigins": [
-            "*"
-        ],
-        "ExposeHeaders": [
-            "Content-Range",
-            "Accept-Ranges",
-            "Content-Length",
-            "Content-Type"
-        ],
-        "MaxAgeSeconds": 3000
+        "AllowedHeaders": ["*"],
+        "AllowedMethods": ["GET", "PUT", "HEAD"],
+        "AllowedOrigins": ["*"],
+        "ExposeHeaders": ["ETag"],
+        "MaxAgeSeconds": 3600
     }
 ]
 ```
-*(Note: You can replace `*` in `AllowedOrigins` with your domain or EC2 Public IP once it's finalized to increase security).*
+
+*(Tighten `AllowedOrigins` to your domain in production. Presigned URLs already gate access, but belts and suspenders.)*
+
+#### Lifecycle rule — the invisible money leak
+
+Cancelled uploads leave invisible, **billed** multipart fragments in S3 forever. Add a lifecycle rule: Bucket → Management → Create rule → check **"Delete expired object delete markers or incomplete multipart uploads"** → abort incomplete multipart uploads after **1 day**. Takes 30 seconds, saves real money.
+
+### 3. MediaConvert IAM Role
+
+MediaConvert needs a role it can assume to read/write your bucket:
+
+1. IAM → Roles → Create role → trusted entity: **MediaConvert**.
+2. Attach a policy with `s3:GetObject` and `s3:PutObject` on `arn:aws:s3:::your-bucket/*`.
+3. Put the role ARN in `AWS_MEDIACONVERT_ROLE_ARN`.
+
+No role ARN = no transcoding = videos stay raw. The app survives this gracefully, but Safari users watching raw MKVs will not.
+
+### 4. EC2 IAM Role (recommended)
+
+Give the instance a role with `s3:ListBucket`, `s3:GetObject`, `s3:PutObject`, `s3:DeleteObject` on your bucket, plus `mediaconvert:*Job*` and `mediaconvert:DescribeEndpoints`, plus DynamoDB read/write on the three tables. Or use access keys in `.env.local` like a rebel.
 
 ---
 
-### Part 2: Configure EC2 Instance IAM Role (Recommended)
+## 🚀 Deploy to EC2
 
-To securely query S3 without storing sensitive credential files on the EC2 server, assign an IAM Role:
-1. Open the **IAM Console** and create a role for **EC2**.
-2. Attach a custom policy granting access to your bucket. Because the application handles user avatar uploads, custom video thumbnail uploads, and video/thumbnail deletions in addition to video streaming, the server requires read, write, and delete permissions:
-```json
-{
-    "Version": "2012-10-17",
-    "Statement": [
-        {
-            "Effect": "Allow",
-            "Action": [
-                "s3:ListBucket",
-                "s3:GetObject",
-                "s3:PutObject",
-                "s3:DeleteObject"
-            ],
-            "Resource": [
-                "arn:aws:s3:::watchpartyapp-online-1234",
-                "arn:aws:s3:::watchpartyapp-online-1234/*"
-            ]
-        }
-    ]
-}
-```
-3. Open the **EC2 Console**, select your EC2 instance.
-4. Click **Actions** > **Security** > **Modify IAM Role**.
-5. Select the newly created role and save.
+Free tier (t2/t3.micro, 1GB RAM) works. This app was *forged* on free tier.
 
-*If you prefer not to use IAM Roles, you must add `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` (with the same permissions listed above) to `.env.local` on the EC2 server.*
-
----
-
-### Part 3: Deploy to EC2 Instance
-
-#### 1. Connect and Install Environment
-Connect to your EC2 instance via SSH and install Node.js and PM2:
 ```bash
-# Install NVM & Node.js
+# Node + PM2
 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
 source ~/.bashrc
 nvm install 20
-
-# Install PM2 globally
 npm install -g pm2
-```
 
-#### 2. Deploy Project Code
-Clone your repository or copy your code files onto the instance. Run installation inside the directory:
-```bash
+# 1GB of RAM will not survive `next build` without swap. Give it swap.
+sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
+sudo mkswap /swapfile && sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+
+# App
+git clone <your-repo> && cd Watch-Party
 npm install
-```
-
-#### 3. Build & Configure App
-Create the production environment file `.env.local` on the server:
-```env
-PORT=3000
-VIDEO_SOURCE=s3
-AWS_REGION=ap-south-1
-S3_BUCKET_NAME=watchpartyapp-online-1234
-```
-Build the Next.js bundle:
-```bash
+# create .env.local (see above, VIDEO_SOURCE=s3)
 npm run build
-```
-
-#### 4. Run with PM2
-Start the app using PM2 under the production script:
-```bash
-pm2 start server.js --name "watch-party" --env NODE_ENV=production
-```
-
-To configure PM2 to automatically launch the application when the server reboots:
-```bash
-pm2 startup
-```
-*Run the command outputted by the terminal (usually starts with `sudo env PATH...`).*
-
-Once completed, save the current PM2 state:
-```bash
+pm2 start npm --name watch-party -- start
+pm2 startup   # run the command it prints
 pm2 save
 ```
 
----
+### The Sacred Deploy Ritual 🕯️
 
-## 🎥 HLS Transcoding & FFmpeg Setup
+Every deploy, in this order, no skipping:
 
-The application automatically converts uploaded videos into Netflix-style HLS (HTTP Live Streaming) format (4-second segments) to ensure lag-free streaming, especially on mobile browsers.
-
-For HLS transcoding to function, **FFmpeg must be installed on your server/EC2 instance**. If FFmpeg is not detected, HLS transcoding is disabled and the server falls back to raw video streaming.
-
-### 1. Installing FFmpeg on EC2 (Step-by-Step Compilation Guide)
-
-Follow this guide to compile and install FFmpeg from source on your EC2 instance:
-
-#### Step 1: Install required dependencies
 ```bash
-sudo yum install -y yasm nasm \
-autoconf automake bzip2 bzip2-devel cmake freetype-devel \
-gcc gcc-c++ git libtool make pkgconfig zlib-devel
+git pull && npm install && npm run build && pm2 restart all
 ```
 
-#### Step 2: Create a directory for FFmpeg source files
-```bash
-mkdir ~/ffmpeg_sources
-cd ~/ffmpeg_sources
-```
-
-#### Step 3: Download and extract FFmpeg source
-```bash
-curl -O -L https://ffmpeg.org/releases/ffmpeg-snapshot.tar.bz2
-tar xjvf ffmpeg-snapshot.tar.bz2
-cd ffmpeg
-```
-
-#### Step 4: Configure FFmpeg build
-```bash
-./configure \
---prefix="/opt/ffmpeg" \
---bindir="/opt/ffmpeg/bin" \
---extra-cflags="-I/opt/ffmpeg/include -fstack-protector-strong -fpie -pie -Wl,-z,relro,-z,now -D_FORTIFY_SOURCE=2" \
---extra-ldflags="-L/opt/ffmpeg/lib" \
---extra-libs=-lpthread \
---extra-libs=-lm \
---enable-libfreetype \
---disable-static \
---enable-shared \
---enable-rpath
-```
-
-#### Step 5: Compile and install FFmpeg
-```bash
-make -j$(nproc)
-sudo make install
-sudo ldconfig
-```
-
-#### Step 6: Update system-wide PATH variables
-To make FFmpeg executable globally and accessible by PM2 or other system runners, add this configuration system-wide:
-```bash
-sudo mkdir -p /etc/systemd/system.conf.d
-sudo sh -c 'cat > /etc/systemd/system.conf.d/ffmpeg.conf << EOL
-[Manager]
-DefaultEnvironment=PATH=/opt/ffmpeg/bin:$PATH
-DefaultEnvironment=LD_LIBRARY_PATH=/opt/ffmpeg/lib:$LD_LIBRARY_PATH
-EOL'
-```
-
-#### Step 7: Apply the configurations
-Reload systemd configuration and reboot the system:
-```bash
-sudo systemctl daemon-reexec
-sudo reboot
-```
-
-### 2. Verifying FFmpeg Setup
-You can run the built-in diagnostic test script on the local machine or your EC2 instance:
-```bash
-node scratch/test-ffmpeg.js
-```
-
-### 3. 📦 Local Storage Cleanup (S3 Mode)
-When running in S3 mode (`VIDEO_SOURCE=s3`):
-* Chunks are uploaded to the local `videos/tmp/<uploadId>` directory.
-* Once the final chunk is received, the server assembles them into `videos/<filename>`.
-* The server then runs FFmpeg to segment the assembled video, generating HLS files inside `videos/hls/<basename>`.
-* The raw video and HLS chunks are uploaded to your S3 bucket.
-* **Auto-Cleanup**: After a successful or failed S3 upload, the local raw video and HLS segment directory are deleted from the EC2 instance to preserve disk space. This is why the local `videos/` folder remains empty.
+Then **hard-refresh the browser** (Ctrl+Shift+R). Roughly half of all "it's still broken" reports in this project's history were a stale build or a cached bundle. The other half were real bugs, but *you* don't know which half you're in until you refresh.
 
 ---
 
-## 🔍 Debugging S3 Issues Locally
+## 🔥 War Stories (aka Troubleshooting)
 
-If you are experiencing S3 connection errors, you can run the built-in diagnostic script locally (if you have the AWS CLI configured on your Mac) or on the server:
+Lessons paid for in downtime, presented free of charge:
+
+**"The server crashes when I upload a big file"**
+It shouldn't anymore — uploads go straight to S3. If it does, you're running an ancient build where 6GB files were assembled in RAM. 1GB of RAM cannot hold 6GB of video; this is not a bug, this is arithmetic. Do the Sacred Deploy Ritual.
+
+**"CPU hits 100% when someone plays a video"**
+Old builds proxied every HLS segment through the server while hls.js prefetched two minutes of video. One viewer = one very busy potato. Current code 302-redirects segments to S3. Verify: play a video, DevTools → Network — `.ts` requests should be 302s followed by `amazonaws.com` fetches. If segments return 200 from your server: stale build. Ritual.
+
+**"Video doesn't start at all"**
+1. Check the bucket CORS has `GET` (see above). Without it, hls.js fails every segment and used to retry *forever* (also fixed — it gives up after 5 attempts now, like a healthy adult).
+2. Check `VIDEO_SOURCE=s3` in `.env.local` on the server.
+3. DevTools console — if you see red CORS errors on `.ts` files, it's the bucket. It's always the bucket.
+
+**"I uploaded an MKV and there's no HLS folder"**
+MediaConvert accepts MKV *containers* but often rejects what's inside — DTS or Vorbis audio are common assassins. The job fails, the video stays raw, Chrome might play it, Safari absolutely will not. Check `pm2 logs` for `[MEDIACONVERT] Job ... FAILED` with the actual error. Best fix — re-encode before uploading:
 ```bash
-node test-s3.js
+ffmpeg -i movie.mkv -c:v copy -c:a aac -movflags +faststart movie.mp4
 ```
-This script will test if your environment can connect, list objects inside the bucket, filter videos, and generate a secure presigned URL.
+(Video track copied, no quality loss, ~as fast as a file copy. Do this on your own machine — the EC2 has suffered enough.)
+
+**"No space left on device"**
+Old builds hoarded video chunks on disk. Current code writes almost nothing locally, but if you're excavating an old instance:
+```bash
+df -h /
+rm -rf videos/tmp/ videos/hls/
+npm cache clean --force
+pm2 flush
+sudo journalctl --vacuum-size=50M
+```
+
+**"My upload vanished when I refreshed the page"**
+Yes. Uploads survive *navigating within the app*, not reloading the tab — the browser destroys the JS context and the upload with it. There's a warning dialog before you do it. The half-uploaded S3 parts get cleaned up by the lifecycle rule (you did add the lifecycle rule, right?).
+
+---
+
+## 🤝 Contributing
+
+PRs welcome. House rules, learned the hard way:
+
+1. Video bytes never touch the server. **Never.**
+2. Don't mark user-initiated play/pause/seek as "programmatic" in VideoPlayer — those suppression counters exist to prevent echo from *remote* commands, and suppressing local actions silently kills room sync. There's a comment in the code that says this. Believe the comment.
+3. If you add a component, import it. `<UserMinus>` remembers.
