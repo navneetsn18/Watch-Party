@@ -1217,9 +1217,17 @@ app.post('/api/upload/multipart/initiate', express.json(), requireAuth, async (r
       }
     };
 
+    // Also reserve against in-flight sessions — with concurrent uploads, two
+    // same-named files could otherwise both pass the DB check and collide.
+    const inFlightNames = new Set(
+      Object.values(uploads)
+        .filter(u => u.status !== 'error')
+        .map(u => u.filename)
+    );
+
     let finalFilename = `${baseNameInput}${ext}`;
     let counter = 1;
-    while (await checkVideoExists(finalFilename)) {
+    while (inFlightNames.has(finalFilename) || await checkVideoExists(finalFilename)) {
       finalFilename = `${baseNameInput}-${counter}${ext}`;
       counter++;
     }
