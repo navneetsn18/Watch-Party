@@ -898,7 +898,11 @@ app.get('/api/hls/:videoname/:file', (req, res) => {
   });
 });
 
-// ─── HLS Segment Serving from S3 (Proxy) ────────────────────────────────────
+// ─── HLS Serving from S3 ────────────────────────────────────────────────────
+// Manifests (.m3u8, tiny text) are proxied so relative segment URIs resolve here.
+// Segments (.ts, the actual video bytes) are 302-redirected to presigned S3 URLs —
+// proxying them pegged the CPU on small instances since every viewer's entire
+// stream flowed through this process. A redirect costs one local HMAC signature.
 app.get('/api/hls-s3/:videoname/:file', async (req, res) => {
   const { videoname, file } = req.params;
   const safeName = decodeURIComponent(videoname).replace(/[^a-zA-Z0-9_\-. ]/g, '');
@@ -907,6 +911,15 @@ app.get('/api/hls-s3/:videoname/:file', async (req, res) => {
 
   try {
     const ext = path.extname(safeFile).toLowerCase();
+
+    if (ext !== '.m3u8') {
+      const url = await getSignedUrl(s3Client, new GetObjectCommand({
+        Bucket: S3_BUCKET,
+        Key: s3Key,
+      }), { expiresIn: 7200 });
+      return res.redirect(302, url);
+    }
+
     const mimeTypes = {
       '.m3u8': 'application/vnd.apple.mpegurl',
       '.ts': 'video/mp2t',
