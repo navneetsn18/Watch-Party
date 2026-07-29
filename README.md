@@ -16,6 +16,7 @@ Watch videos in perfect sync with people, argue about the movie in chat, and thr
 * **Background uploads** — start an upload, wander off to watch something else in the same tab, upload several files at once. Status list shows progress/speed/ETA per file.
 * **Feed** — grid of uploads with thumbnails; one click starts a watch party. Mark a video Private to keep it off everyone else's feed.
 * **Chat & reactions** — room chat plus emoji that float up the screen like balloons (they used to shoot; we fixed their attitude).
+* **Watch YouTube together** — host pastes any YouTube link in the Videos tab and the whole room syncs on the official embedded player. Caveats: public/unlisted videos only (members-only and age-restricted videos block embedding — that's YouTube, not us), and ads may briefly desync viewers until the drift correction reels everyone back in. This is the one feature that needs internet, for reasons that should be obvious.
 
 **Removed on purpose** (this is the couch edition): passwords, email, friend requests, user search, verified badges, and every AWS invoice.
 
