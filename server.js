@@ -510,7 +510,7 @@ function getOrCreateRoom(roomId) {
     rooms[roomId] = {
       host: null,
       users: new Map(),
-      state: { videoKey: null, playing: false, currentTime: 0, lastUpdated: Date.now(), hostBuffering: false },
+      state: { videoKey: null, playing: false, currentTime: 0, lastUpdated: Date.now(), hostBuffering: false, ended: false },
       guestControls: true,
       queue: [],
     };
@@ -584,6 +584,27 @@ async function fetchPlaylistVideos(playlistId) {
     .filter(Boolean);
 }
 
+// A room is idle (safe to auto-advance into) either because nothing has ever
+// played, or because the last video finished and the queue was empty at that
+// moment — the `ended` flag distinguishes that from an intentional mid-video
+// pause, which also sets playing:false but must NOT be auto-advanced away from.
+function isRoomIdle(room) {
+  return !room.state.videoKey || room.state.ended;
+}
+
+function playQueueItem(room, roomId, item) {
+  room.state = {
+    videoKey: `youtube:${item.videoId}`,
+    playing: true,
+    currentTime: 0,
+    lastUpdated: Date.now(),
+    hostBuffering: false,
+    ended: false,
+  };
+  io.to(roomId).emit('video-selected', { videoKey: room.state.videoKey, autoplay: true });
+  io.to(roomId).emit('queue-updated', room.queue);
+}
+
 // Pull the oldest approved item off the queue and make it the room's active
 // video with autoplay. Used when a video ends, the host skips, or a fresh
 // approval/add unblocks a room that had nothing playing.
@@ -591,15 +612,7 @@ function advanceQueue(room, roomId) {
   const idx = room.queue.findIndex(q => q.status === 'approved');
   if (idx === -1) return false;
   const [next] = room.queue.splice(idx, 1);
-  room.state = {
-    videoKey: `youtube:${next.videoId}`,
-    playing: true,
-    currentTime: 0,
-    lastUpdated: Date.now(),
-    hostBuffering: false,
-  };
-  io.to(roomId).emit('video-selected', { videoKey: room.state.videoKey, autoplay: true });
-  io.to(roomId).emit('queue-updated', room.queue);
+  playQueueItem(room, roomId, next);
   return true;
 }
 
@@ -664,7 +677,7 @@ io.on('connection', (socket) => {
   socket.on('select-video', ({ roomId, videoKey }) => {
     const room = rooms[roomId];
     if (!room || room.host !== socket.id) return;
-    room.state = { videoKey, playing: false, currentTime: 0, lastUpdated: Date.now(), hostBuffering: false };
+    room.state = { videoKey, playing: false, currentTime: 0, lastUpdated: Date.now(), hostBuffering: false, ended: false };
     io.to(roomId).emit('video-selected', { videoKey });
   });
 
@@ -723,7 +736,7 @@ io.on('connection', (socket) => {
         socket.emit('queue-info', { message: 'Added to queue — waiting for host approval' });
       }
 
-      if (!room.state.videoKey) advanceQueue(room, roomId);
+      if (isRoomIdle(room)) advanceQueue(room, roomId);
     } catch (err) {
       console.error('[QUEUE] Add failed:', err.message);
       socket.emit('queue-error', { message: err.message || 'Failed to add video' });
@@ -737,7 +750,19 @@ io.on('connection', (socket) => {
     if (!item) return;
     item.status = 'approved';
     io.to(roomId).emit('queue-updated', room.queue);
-    if (!room.state.videoKey) advanceQueue(room, roomId);
+    if (isRoomIdle(room)) advanceQueue(room, roomId);
+  });
+
+  // Host clicks a specific approved queue item to play it right now,
+  // out of FIFO order. Pending items aren't eligible — approve first,
+  // keeping the approval gate meaningful rather than a rubber stamp.
+  socket.on('queue-play-now', ({ roomId, itemId }) => {
+    const room = rooms[roomId];
+    if (!room || room.host !== socket.id) return;
+    const idx = room.queue.findIndex(q => q.id === itemId && q.status === 'approved');
+    if (idx === -1) return;
+    const [item] = room.queue.splice(idx, 1);
+    playQueueItem(room, roomId, item);
   });
 
   socket.on('queue-reject', ({ roomId, itemId }) => {
@@ -775,6 +800,7 @@ io.on('connection', (socket) => {
     if (!room || room.host !== socket.id) return;
     if (!advanceQueue(room, roomId)) {
       room.state.playing = false;
+      room.state.ended = true;
       room.state.lastUpdated = Date.now();
     }
   });

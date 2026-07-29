@@ -504,6 +504,10 @@ function RoomContent({ roomId }) {
     socketRef.current?.emit('queue-skip', { roomId });
   }
 
+  function handleQueuePlayNow(itemId) {
+    socketRef.current?.emit('queue-play-now', { roomId, itemId });
+  }
+
   const handleVideoEnded = useCallback(() => {
     const socket = socketRef.current;
     if (socket && isHostRef.current) socket.emit('video-ended', { roomId });
@@ -726,6 +730,9 @@ function RoomContent({ roomId }) {
                 <div className="flex items-center justify-between mt-2 mb-1">
                   <span className="text-[10px] uppercase font-black text-zinc-500 tracking-wider">
                     Up Next ({queue.filter(q => q.status === 'approved').length})
+                    {isHost && queue.some(q => q.status === 'approved') && (
+                      <span className="normal-case font-medium text-zinc-600 tracking-normal"> — click one to play it now</span>
+                    )}
                   </span>
                   {isHost && currentVideoKey?.startsWith('youtube:') && (
                     <button
@@ -744,17 +751,28 @@ function RoomContent({ roomId }) {
                   </div>
                 ) : (
                   <div className="flex flex-col gap-2 mb-2">
-                    {queue.map((item) => (
+                    {queue.map((item) => {
+                      const canPlayNow = isHost && item.status === 'approved';
+                      return (
                       <div
                         key={item.id}
-                        className={`flex items-center gap-2.5 p-2 rounded-xl border ${
+                        onClick={canPlayNow ? () => handleQueuePlayNow(item.id) : undefined}
+                        title={canPlayNow ? 'Play now' : undefined}
+                        className={`group flex items-center gap-2.5 p-2 rounded-xl border transition-colors ${
                           item.status === 'pending'
                             ? 'bg-amber-950/10 border-amber-900/30'
                             : 'bg-zinc-950 border-zinc-900/80'
-                        }`}
+                        } ${canPlayNow ? 'cursor-pointer hover:border-violet-800/50 hover:bg-violet-950/10' : ''}`}
                       >
                         {item.thumbnail ? (
-                          <img src={item.thumbnail} alt="" className="w-14 h-8 object-cover rounded-md flex-shrink-0" />
+                          <div className="relative w-14 h-8 flex-shrink-0">
+                            <img src={item.thumbnail} alt="" className="w-full h-full object-cover rounded-md" />
+                            {canPlayNow && (
+                              <div className="absolute inset-0 rounded-md bg-black/50 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
+                                <CirclePlay className="w-4 h-4 text-white" />
+                              </div>
+                            )}
+                          </div>
                         ) : (
                           <div className="w-14 h-8 rounded-md bg-zinc-900 flex items-center justify-center flex-shrink-0">
                             <CirclePlay className="w-3.5 h-3.5 text-zinc-600" />
@@ -793,7 +811,7 @@ function RoomContent({ roomId }) {
                         )}
                         {(isHost || isMyQueueItem(item)) && item.status !== 'pending' && (
                           <button
-                            onClick={() => handleQueueRemove(item.id)}
+                            onClick={(e) => { e.stopPropagation(); handleQueueRemove(item.id); }}
                             title="Remove from queue"
                             className="p-1.5 rounded-lg text-zinc-500 hover:text-red-400 hover:bg-red-950/20 transition-all cursor-pointer flex-shrink-0"
                           >
@@ -801,7 +819,8 @@ function RoomContent({ roomId }) {
                           </button>
                         )}
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 )}
 
