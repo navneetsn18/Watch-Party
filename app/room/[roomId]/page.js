@@ -3,12 +3,13 @@
 import { useState, useEffect, useRef, useCallback, use, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Trash2, MessageSquare, Tv, Crown, Eye, ShieldAlert, ShieldCheck, Loader2 } from 'lucide-react';
+import { Trash2, MessageSquare, Tv, Crown, Eye, ShieldAlert, ShieldCheck, Loader2, CirclePlay } from 'lucide-react';
 import { getSocket, disconnectSocket } from '../../../lib/socket';
 import { formatSize } from '../../../lib/utils';
 import { ToastProvider, useToast } from '../../../components/Toast';
 import TopBar from '../../../components/TopBar';
 import VideoPlayer from '../../../components/VideoPlayer';
+import YouTubePlayer from '../../../components/YouTubePlayer';
 import ChatPanel from '../../../components/ChatPanel';
 import ShareModal from '../../../components/ShareModal';
 import GuestRequestModal from '../../../components/GuestRequestModal';
@@ -62,6 +63,7 @@ function RoomContent({ roomId }) {
   const [isHost, setIsHost] = useState(false);
   const [userCount, setUserCount] = useState(1);
   const [watchers, setWatchers] = useState([]);
+  const [ytUrl, setYtUrl] = useState('');
   const [guestControls, setGuestControls] = useState(true);
   const [videoUrl, setVideoUrl] = useState(null);
   const [currentVideoKey, setCurrentVideoKey] = useState(null);
@@ -116,6 +118,11 @@ function RoomContent({ roomId }) {
     if (key === currentVideoKeyRef.current) return false;
     currentVideoKeyRef.current = key;
     setCurrentVideoKey(key);
+    // YouTube keys need no URL resolution — the player embeds the ID directly
+    if (key.startsWith('youtube:')) {
+      setVideoUrl(null);
+      return true;
+    }
     try {
       const session = await supabase.auth.getSession();
       const token = session.data.session?.access_token || '';
@@ -460,6 +467,29 @@ function RoomContent({ roomId }) {
     }
   }, [roomId]);
 
+  // Accepts watch/short/live/embed/youtu.be URLs or a bare 11-char ID
+  function parseYouTubeId(input) {
+    const s = input.trim();
+    const m = s.match(/(?:youtube\.com\/(?:watch\?.*v=|shorts\/|embed\/|live\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/);
+    if (m) return m[1];
+    if (/^[A-Za-z0-9_-]{11}$/.test(s)) return s;
+    return null;
+  }
+
+  function handleSelectYouTube() {
+    const id = parseYouTubeId(ytUrl);
+    if (!id) {
+      showToast('⚠️ Could not find a YouTube video ID in that link');
+      return;
+    }
+    const key = `youtube:${id}`;
+    const socket = socketRef.current;
+    if (!socket) return;
+    socket.emit('select-video', { roomId, videoKey: key });
+    loadVideo(key);
+    setYtUrl('');
+  }
+
   function handleSelectVideo(video) {
     const socket = socketRef.current;
     if (!socket) return;
@@ -522,7 +552,7 @@ function RoomContent({ roomId }) {
         watchers={watchers}
         isHost={isHost}
         guestControls={guestControls}
-        videoName={currentVideoKey ? currentVideoKey.replace(/^videos\//, '') : null}
+        videoName={currentVideoKey ? (currentVideoKey.startsWith('youtube:') ? '▶ YouTube video' : currentVideoKey.replace(/^videos\//, '')) : null}
         onToggleGuestControls={handleToggleGuestControls}
         onShareClick={() => setShareOpen(true)}
         onCopyRoomId={handleCopyRoomId}
@@ -532,23 +562,38 @@ function RoomContent({ roomId }) {
       <div className="flex-1 flex flex-col md:flex-row min-h-0 overflow-hidden relative">
         {/* Left Side: Video Player Container */}
         <div className="flex-1 bg-black relative flex items-center justify-center min-h-[40vh] md:min-h-0 overflow-hidden">
-          <VideoPlayer
-            ref={playerRef}
-            videoUrl={videoUrl}
-            isHost={isHost}
-            guestControls={guestControls}
-            canControl={canControl}
-            onPlay={handlePlay}
-            onPause={handlePause}
-            onSeek={handleSeek}
-            onLoadedMetadata={handleLoadedMetadata}
-            onHostBuffering={handleHostBuffering}
-            fullscreenNotifications={fsNotifications}
-            onRequestAction={!canControl ? handleRequestAction : undefined}
-            guestRequests={guestRequests}
-            onApproveRequest={handleApproveRequest}
-            onRejectRequest={handleRejectRequest}
-          />
+          {currentVideoKey?.startsWith('youtube:') ? (
+            <YouTubePlayer
+              ref={playerRef}
+              videoId={currentVideoKey.slice(8)}
+              isHost={isHost}
+              canControl={canControl}
+              onPlay={handlePlay}
+              onPause={handlePause}
+              onSeek={handleSeek}
+              onLoadedMetadata={handleLoadedMetadata}
+              onHostBuffering={handleHostBuffering}
+              onRequestAction={!canControl ? handleRequestAction : undefined}
+            />
+          ) : (
+            <VideoPlayer
+              ref={playerRef}
+              videoUrl={videoUrl}
+              isHost={isHost}
+              guestControls={guestControls}
+              canControl={canControl}
+              onPlay={handlePlay}
+              onPause={handlePause}
+              onSeek={handleSeek}
+              onLoadedMetadata={handleLoadedMetadata}
+              onHostBuffering={handleHostBuffering}
+              fullscreenNotifications={fsNotifications}
+              onRequestAction={!canControl ? handleRequestAction : undefined}
+              guestRequests={guestRequests}
+              onApproveRequest={handleApproveRequest}
+              onRejectRequest={handleRejectRequest}
+            />
+          )}
         </div>
 
         {/* Right Side: Sidebar Panel */}
@@ -618,6 +663,35 @@ function RoomContent({ roomId }) {
 
               {/* Videos list scrolling grid */}
               <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-2">
+                {/* YouTube box */}
+                <span className="text-[10px] uppercase font-black text-zinc-500 tracking-wider mb-1 block">
+                  Watch from YouTube
+                </span>
+                <div className={`flex items-center gap-2 p-2 rounded-xl border transition-all ${
+                  currentVideoKey?.startsWith('youtube:')
+                    ? 'bg-red-950/15 border-red-800/40'
+                    : 'bg-zinc-950 border-zinc-900/80'
+                }`}>
+                  <CirclePlay className="w-4 h-4 text-red-500 flex-shrink-0" />
+                  <input
+                    type="text"
+                    value={ytUrl}
+                    onChange={(e) => setYtUrl(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') handleSelectYouTube(); }}
+                    placeholder="Paste a YouTube link…"
+                    className="flex-1 min-w-0 bg-transparent text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none"
+                  />
+                  <button
+                    onClick={handleSelectYouTube}
+                    className="px-2.5 py-1 rounded-lg bg-red-600 hover:bg-red-500 text-white text-[10px] font-bold cursor-pointer transition-colors flex-shrink-0"
+                  >
+                    Play
+                  </button>
+                </div>
+                <span className="text-[9px] text-zinc-600 mb-2 leading-snug">
+                  Public videos only — members-only and embed-blocked videos won&apos;t play. Ads may briefly desync viewers; sync self-heals after.
+                </span>
+
                 <span className="text-[10px] uppercase font-black text-zinc-500 tracking-wider mb-1 block">
                   Available Videos ({videos.length})
                 </span>
