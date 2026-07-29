@@ -37,3 +37,6 @@ next-env.d.ts
 /videos/*
 *accessKeys.csv
 *.csv
+# local data (sqlite db, uploaded media)
+/data/
+/public/uploads/

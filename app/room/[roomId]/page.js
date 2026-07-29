@@ -61,6 +61,7 @@ function RoomContent({ roomId }) {
 
   const [isHost, setIsHost] = useState(false);
   const [userCount, setUserCount] = useState(1);
+  const [watchers, setWatchers] = useState([]);
   const [guestControls, setGuestControls] = useState(true);
   const [videoUrl, setVideoUrl] = useState(null);
   const [currentVideoKey, setCurrentVideoKey] = useState(null);
@@ -222,6 +223,8 @@ function RoomContent({ roomId }) {
     });
 
     socket.on('user-count', (c) => setUserCount(c));
+
+    socket.on('user-list', (list) => setWatchers(Array.isArray(list) ? list : []));
 
     socket.on('guest-controls-changed', ({ enabled }) => {
       setGuestControls(enabled);
@@ -516,6 +519,7 @@ function RoomContent({ roomId }) {
       <TopBar
         roomId={roomId}
         userCount={userCount}
+        watchers={watchers}
         isHost={isHost}
         guestControls={guestControls}
         videoName={currentVideoKey ? currentVideoKey.replace(/^videos\//, '') : null}

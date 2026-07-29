@@ -24,8 +24,7 @@ function formatDuration(seconds) {
 }
 
 const STATE_LABELS = {
-  uploading: 'Uploading to S3',
-  assembling: 'Finalizing on S3',
+  uploading: 'Copying to library',
   transcoding: 'Converting to HLS',
   complete: 'Ready to watch',
   error: 'Failed',
@@ -359,7 +358,7 @@ export default function UploadPage() {
                   <span className="text-[10px] text-zinc-500 font-mono mt-0.5">
                     {STATE_LABELS[task.state] || task.state}
                     {task.state === 'uploading' && ` • ${formatBytes(task.uploadedBytes)} / ${formatBytes(task.size)} • ${formatBytes(task.speed)}/s • ETA ${task.eta !== null ? formatDuration(task.eta) : '—'}`}
-                    {task.state === 'transcoding' && ` • ${task.jobPercentComplete}%`}
+                    {task.state === 'transcoding' && ` • ${task.tsCreated || 0} segments created`}
                   </span>
                   {task.state === 'error' && task.error && (
                     <span className="text-[11px] text-red-400 mt-1 leading-snug">{task.error}</span>
@@ -394,10 +393,7 @@ export default function UploadPage() {
               )}
               {task.state === 'transcoding' && (
                 <div className="w-full h-2 bg-zinc-950 rounded-full overflow-hidden border border-zinc-900">
-                  <div
-                    className="h-full bg-gradient-to-r from-emerald-500 to-teal-500 transition-all duration-300"
-                    style={{ width: `${task.jobPercentComplete}%` }}
-                  />
+                  <div className="h-full w-1/3 bg-gradient-to-r from-emerald-500 to-teal-500 rounded-full animate-pulse" />
                 </div>
               )}
             </div>
@@ -412,9 +408,9 @@ export default function UploadPage() {
             <Layers className="w-4 h-4" />
           </div>
           <div className="flex flex-col">
-            <span className="text-xs font-bold text-white">Direct S3 Multi-part</span>
+            <span className="text-xs font-bold text-white">Local Library</span>
             <span className="text-[10px] text-zinc-500 mt-1 leading-relaxed">
-              Uploads bypass intermediate servers, shipping 100MB chunks in parallel.
+              Videos stream straight to the videos/ folder on this machine. No cloud, no bills.
             </span>
           </div>
         </div>
@@ -424,9 +420,9 @@ export default function UploadPage() {
             <Cpu className="w-4 h-4" />
           </div>
           <div className="flex flex-col">
-            <span className="text-xs font-bold text-white">AWS MediaConvert</span>
+            <span className="text-xs font-bold text-white">Local FFmpeg HLS</span>
             <span className="text-[10px] text-zinc-500 mt-1 leading-relaxed">
-              Transcodes video serverlessly to handle HLS adaptive bitrates automatically.
+              Videos are chopped into 4-second .ts segments on this PC for smooth seeking. MKVs get browser-friendly audio.
             </span>
           </div>
         </div>

@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Home, Compass, Search, User, Upload, Coffee, LogOut, ShieldCheck } from 'lucide-react';
+import { Home, Compass, User, Upload, Coffee, LogOut, ShieldCheck } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { VerifiedBadge } from './VerifiedBadge';
 
@@ -81,7 +81,6 @@ export default function NavBar() {
 
   const tabs = [
     { id: '/feed', name: 'Feed', icon: Compass },
-    { id: '/search', name: 'Search', icon: Search },
     { id: '/', name: 'Lobby', icon: Home },
     { id: '/profile', name: 'Profile', icon: User },
   ];
@@ -178,19 +177,9 @@ export default function NavBar() {
                     <span className="text-sm">{getFlagEmoji(profile.country)}</span>
                   )}
                 </div>
-                <div className="text-xs text-zinc-400 truncate">
-                  <span className="font-medium text-zinc-500">Email: </span>
-                  {user.email}
-                </div>
-                {profile?.dob && (
-                  <div className="text-xs text-zinc-400">
-                    <span className="font-medium text-zinc-500">DOB: </span>
-                    {profile.dob}
-                  </div>
-                )}
                 <div className="text-xs text-zinc-400">
-                  <span className="font-medium text-zinc-500">Scope: </span>
-                  {profile?.is_private ? '🔒 Private' : '🌐 Public'}
+                  <span className="font-medium text-zinc-500">Profile: </span>
+                  Local — no password needed
                 </div>
               </div>
             </div>

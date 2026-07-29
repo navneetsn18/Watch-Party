@@ -210,7 +210,7 @@ export default function FeedPage() {
                       {video.isPrivate ? (
                         <>
                           <Lock className="w-2.5 h-2.5 text-zinc-500" />
-                          <span>Friends Only</span>
+                          <span>Only Me</span>
                         </>
                       ) : (
                         <>

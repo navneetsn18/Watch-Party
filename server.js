@@ -1,222 +1,66 @@
+// Watch Party — fully offline edition.
+// SQLite for data, local disk for videos, local ffmpeg for HLS. No cloud.
 const path = require('path');
-require('dotenv').config({ path: path.join(__dirname, '.env.local') });
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const next = require('next');
 const fs = require('fs');
 const crypto = require('crypto');
-
-const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
-const { DynamoDBDocumentClient, GetCommand, PutCommand, ScanCommand, QueryCommand, DeleteCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
-const bcrypt = require('bcryptjs');
+const { execSync, spawn } = require('child_process');
 const jwt = require('jsonwebtoken');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'watch-party-secret-key-12345';
+const store = require('./lib/db');
 
-const ddbRawClient = new DynamoDBClient({
-  region: process.env.AWS_REGION || 'ap-south-1',
-  credentials: {
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-  }
-});
-const ddbDocClient = DynamoDBDocumentClient.from(ddbRawClient);
+// JWT here is just a session cookie substitute for a trusted local network —
+// there are no passwords to protect.
+const JWT_SECRET = process.env.JWT_SECRET || 'watch-party-local-secret';
+const PORT = process.env.PORT || 3000;
+const dev = process.env.NODE_ENV !== 'production';
 
-const requireAuth = async (req, res, next) => {
+const VIDEOS_DIR = path.join(__dirname, 'videos');
+const HLS_DIR = path.join(VIDEOS_DIR, 'hls');
+const UPLOADS_DIR = path.join(__dirname, 'public', 'uploads');
+fs.mkdirSync(HLS_DIR, { recursive: true });
+fs.mkdirSync(path.join(UPLOADS_DIR, 'avatars'), { recursive: true });
+fs.mkdirSync(path.join(UPLOADS_DIR, 'thumbnails'), { recursive: true });
+
+// Detect FFmpeg — needed for HLS transcoding. Without it videos still play
+// via range streaming, just without segmented seeking.
+let FFMPEG_PATH = null;
+try {
+  FFMPEG_PATH = execSync('which ffmpeg', { encoding: 'utf-8' }).trim();
+  console.log(`[DEBUG] FFmpeg found at: ${FFMPEG_PATH}`);
+} catch {
+  console.log('[DEBUG] FFmpeg not found. Videos will stream raw (no HLS).');
+}
+
+const requireAuth = (req, res, nextFn) => {
   const authHeader = req.headers.authorization;
   const token = authHeader && authHeader.split(' ')[1];
   if (!token) return res.status(401).json({ error: 'Unauthorized: Missing token' });
-
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    req.user = decoded; // { id, email, username }
-    next();
-  } catch (err) {
+    req.user = jwt.verify(token, JWT_SECRET); // { id, username }
+    nextFn();
+  } catch {
     return res.status(401).json({ error: 'Unauthorized: Invalid or expired token' });
   }
 };
 
-// ─── DynamoDB User Helper Functions ──────────────────────────────────────────
-async function getUserByEmail(email) {
-  try {
-    const res = await ddbDocClient.send(new GetCommand({
-      TableName: 'watch_party_users',
-      Key: { email: email.trim().toLowerCase() }
-    }));
-    return res.Item || null;
-  } catch (err) {
-    console.error('[DynamoDB] getUserByEmail error:', err);
-    return null;
-  }
-}
-
-async function getUserByUsername(username) {
-  try {
-    const cleanUsername = username.trim().toLowerCase().replace(/[^a-z0-9_]/g, '');
-    const res = await ddbDocClient.send(new QueryCommand({
-      TableName: 'watch_party_users',
-      IndexName: 'username-index',
-      KeyConditionExpression: 'username = :u',
-      ExpressionAttributeValues: {
-        ':u': cleanUsername
-      }
-    }));
-    return res.Items && res.Items.length > 0 ? res.Items[0] : null;
-  } catch (err) {
-    console.error('[DynamoDB] getUserByUsername error:', err);
-    return null;
-  }
-}
-
-async function getUserById(id) {
-  try {
-    const res = await ddbDocClient.send(new ScanCommand({
-      TableName: 'watch_party_users',
-      FilterExpression: 'id = :id',
-      ExpressionAttributeValues: {
-        ':id': id
-      }
-    }));
-    return res.Items && res.Items.length > 0 ? res.Items[0] : null;
-  } catch (err) {
-    console.error('[DynamoDB] getUserById error:', err);
-    return null;
-  }
-}
-
-async function getAllUsersMap() {
-  try {
-    const res = await ddbDocClient.send(new ScanCommand({
-      TableName: 'watch_party_users'
-    }));
-    const map = {};
-    if (res.Items) {
-      res.Items.forEach(user => {
-        map[user.id] = user;
-      });
-    }
-    return map;
-  } catch (err) {
-    console.error('[DynamoDB] getAllUsersMap error:', err);
-    return {};
-  }
-}
-
-async function getAcceptedFriends(userId) {
-  try {
-    const [res1, res2] = await Promise.all([
-      ddbDocClient.send(new QueryCommand({
-        TableName: 'watch_party_friendships',
-        KeyConditionExpression: 'senderId = :uId',
-        ExpressionAttributeValues: {
-          ':uId': userId
-        }
-      })),
-      ddbDocClient.send(new QueryCommand({
-        TableName: 'watch_party_friendships',
-        IndexName: 'receiverId-index',
-        KeyConditionExpression: 'receiverId = :uId',
-        ExpressionAttributeValues: {
-          ':uId': userId
-        }
-      }))
-    ]);
-
-    const friendIds = [];
-    const allRelationships = [...(res1.Items || []), ...(res2.Items || [])];
-    allRelationships.forEach(rel => {
-      if (rel.status === 'accepted') {
-        const friendId = rel.senderId === userId ? rel.receiverId : rel.senderId;
-        if (!friendIds.includes(friendId)) {
-          friendIds.push(friendId);
-        }
-      }
-    });
-    return friendIds;
-  } catch (err) {
-    console.error('[DynamoDB] getAcceptedFriends error:', err);
-    return [];
-  }
-}
-
 function getFlagEmoji(countryCode) {
   if (!countryCode || countryCode.length !== 2) return '';
-  const codePoints = countryCode
-    .toUpperCase()
-    .split('')
-    .map(char => 127397 + char.charCodeAt(0));
-  return String.fromCodePoint(...codePoints);
+  return String.fromCodePoint(...countryCode.toUpperCase().split('').map(c => 127397 + c.charCodeAt(0)));
 }
 
-
-// ─── Config ──────────────────────────────────────────────────────────────────
-const dev = process.env.NODE_ENV !== 'production';
-const PORT = process.env.PORT || 3000;
-const VIDEO_SOURCE = (process.env.VIDEO_SOURCE || 'local').trim();
-
-console.log('[DEBUG] --- Server Starting ---');
-console.log(`[DEBUG] VIDEO_SOURCE resolved to: "${VIDEO_SOURCE}"`);  
-
-// S3 support (optional)
-let s3Client, GetObjectCommand, PutObjectCommand, DeleteObjectCommand, HeadObjectCommand, getSignedUrl, S3_BUCKET, ListObjectsV2Command, DeleteObjectsCommand;
-let CreateMultipartUploadCommand, UploadPartCommand, CompleteMultipartUploadCommand, AbortMultipartUploadCommand;
-let mediaConvertClient = null;
-
-if (process.env.S3_BUCKET_NAME?.trim()) {
-  const { 
-    S3Client, 
-    GetObjectCommand: GOC, 
-    ListObjectsV2Command: LOV2, 
-    PutObjectCommand: POC, 
-    DeleteObjectCommand: DOC, 
-    HeadObjectCommand: HOC, 
-    DeleteObjectsCommand: DOCS,
-    CreateMultipartUploadCommand: CMUC,
-    UploadPartCommand: UPC,
-    CompleteMultipartUploadCommand: CMUC_COMP,
-    AbortMultipartUploadCommand: AMUC
-  } = require('@aws-sdk/client-s3');
-  const { getSignedUrl: gsu } = require('@aws-sdk/s3-request-presigner');
-  const { MediaConvertClient, DescribeEndpointsCommand } = require('@aws-sdk/client-mediaconvert');
-
-  s3Client = new S3Client({ region: (process.env.AWS_REGION || 'us-east-1').trim() });
-  GetObjectCommand = GOC;
-  PutObjectCommand = POC;
-  DeleteObjectCommand = DOC;
-  HeadObjectCommand = HOC;
-  getSignedUrl = gsu;
-  ListObjectsV2Command = LOV2;
-  DeleteObjectsCommand = DOCS;
-  CreateMultipartUploadCommand = CMUC;
-  UploadPartCommand = UPC;
-  CompleteMultipartUploadCommand = CMUC_COMP;
-  AbortMultipartUploadCommand = AMUC;
-  S3_BUCKET = process.env.S3_BUCKET_NAME.trim();
-  console.log(`[DEBUG] Initializing S3 Client | Region: "${process.env.AWS_REGION?.trim()}" | Bucket: "${S3_BUCKET}"`);
-
-  // Resolve MediaConvert Endpoint asynchronously
-  async function resolveMediaConvertEndpoint() {
-    try {
-      const tempClient = new MediaConvertClient({ region: (process.env.AWS_REGION || 'us-east-1').trim() });
-      const data = await tempClient.send(new DescribeEndpointsCommand({ MaxResults: 1 }));
-      if (data.Endpoints && data.Endpoints.length > 0) {
-        const endpointUrl = data.Endpoints[0].Url;
-        console.log(`[DEBUG] MediaConvert Custom Endpoint resolved: ${endpointUrl}`);
-        mediaConvertClient = new MediaConvertClient({
-          region: (process.env.AWS_REGION || 'us-east-1').trim(),
-          endpoint: endpointUrl
-        });
-      } else {
-        throw new Error('No endpoints returned');
-      }
-    } catch (err) {
-      console.error('[DEBUG] Failed to resolve MediaConvert endpoint via DescribeEndpoints:', err.message);
-      // Fallback: initialize without custom endpoint (SDK will attempt region default)
-      mediaConvertClient = new MediaConvertClient({ region: (process.env.AWS_REGION || 'us-east-1').trim() });
-    }
-  }
-  resolveMediaConvertEndpoint();
+function clientUser(user) {
+  return {
+    id: user.id,
+    username: user.username,
+    country: user.country || '',
+    avatarUrl: user.avatarUrl || '',
+    avatar_url: user.avatarUrl || '',
+    createdAt: user.createdAt,
+  };
 }
 
 // ─── Next.js Setup ───────────────────────────────────────────────────────────
@@ -226,588 +70,159 @@ const nextHandler = nextApp.getRequestHandler();
 const app = express();
 const server = http.createServer(app);
 
-// ─── Authentication API Routes ───────────────────────────────────────────────
-app.use(express.json({ limit: '10mb' }));
-
-app.post('/api/auth/register', async (req, res) => {
-  const { email, password, username, country, dob } = req.body;
-  const cleanEmail = email?.trim().toLowerCase();
-  const cleanPassword = password?.trim();
-  const cleanUsername = username?.trim().toLowerCase().replace(/[^a-z0-9_]/g, '');
-
-  if (!cleanEmail || !cleanPassword || !cleanUsername) {
-    return res.status(400).json({ error: 'Email, password, and username are required' });
+// ─── Auth: name-only login ───────────────────────────────────────────────────
+// No passwords. Enter a name; if it exists you're that person, otherwise the
+// account is created. This app runs on a couch, not on the internet.
+app.post('/api/auth/login', express.json(), (req, res) => {
+  const cleanUsername = req.body.username?.trim().toLowerCase().replace(/[^a-z0-9_]/g, '');
+  if (!cleanUsername) {
+    return res.status(400).json({ error: 'Name is required' });
   }
 
   try {
-    const existingEmailUser = await getUserByEmail(cleanEmail);
-    if (existingEmailUser) {
-      return res.status(400).json({ error: 'Email is already registered. Please sign in.' });
-    }
-
-    const existingUsernameUser = await getUserByUsername(cleanUsername);
-    if (existingUsernameUser) {
-      return res.status(400).json({ error: 'Username is already taken' });
-    }
-
-    const passwordHash = await bcrypt.hash(cleanPassword, 10);
-
-    const newUser = {
-      email: cleanEmail,
-      username: cleanUsername,
-      id: crypto.randomUUID(),
-      passwordHash,
-      dob: dob || null,
-      country: country || 'IN',
-      avatarUrl: '',
-      isVerified: false,
-      isPrivate: false,
-      createdAt: new Date().toISOString()
-    };
-
-    await ddbDocClient.send(new PutCommand({
-      TableName: 'watch_party_users',
-      Item: newUser
-    }));
-
-    console.log(`[AUTH] User registered successfully: ${cleanUsername} (${cleanEmail})`);
-    return res.json({ success: true });
-  } catch (err) {
-    console.error('[API Register Error]', err);
-    return res.status(500).json({ error: 'Failed to create user account' });
-  }
-});
-
-app.post('/api/auth/login', async (req, res) => {
-  const { email, password } = req.body;
-  const cleanEmail = email?.trim().toLowerCase();
-  const cleanPassword = password?.trim();
-
-  if (!cleanEmail || !cleanPassword) {
-    return res.status(400).json({ error: 'Email and password are required' });
-  }
-
-  try {
-    const user = await getUserByEmail(cleanEmail);
+    let user = store.getUserByUsername(cleanUsername);
     if (!user) {
-      return res.status(401).json({ error: 'Invalid email or password' });
+      user = {
+        id: crypto.randomUUID(),
+        username: cleanUsername,
+        avatarUrl: '',
+        country: req.body.country || 'IN',
+        createdAt: new Date().toISOString(),
+      };
+      store.createUser(user);
+      console.log(`[AUTH] New user: ${cleanUsername}`);
     }
 
-    const isValid = await bcrypt.compare(cleanPassword, user.passwordHash);
-    if (!isValid) {
-      return res.status(401).json({ error: 'Invalid email or password' });
-    }
-
-    const token = jwt.sign(
-      { id: user.id, email: user.email, username: user.username },
-      JWT_SECRET,
-      { expiresIn: '7d' }
-    );
-
-    const { passwordHash, ...profile } = user;
-    const clientUserObj = {
-      ...profile,
-      avatar_url: user.avatarUrl || '',
-      is_private: user.isPrivate || false,
-      is_verified: user.isVerified || false
-    };
-
-    return res.json({ token, user: clientUserObj });
+    const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '30d' });
+    return res.json({ token, user: clientUser(user) });
   } catch (err) {
     console.error('[API Login Error]', err);
-    return res.status(500).json({ error: 'Authentication failed' });
+    return res.status(500).json({ error: 'Login failed' });
   }
 });
 
-// ─── Profile API Routes ──────────────────────────────────────────────────────
-app.get('/api/profile', requireAuth, async (req, res) => {
-  try {
-    const user = await getUserByEmail(req.user.email);
-    if (!user) {
-      return res.status(404).json({ error: 'User profile not found' });
-    }
-    const { passwordHash, ...profile } = user;
-    const clientProfile = {
-      ...profile,
-      avatar_url: user.avatarUrl || '',
-      is_private: user.isPrivate || false,
-      is_verified: user.isVerified || false
-    };
-    return res.json(clientProfile);
-  } catch (err) {
-    return res.status(500).json({ error: 'Failed to retrieve profile' });
-  }
+// ─── Profile ─────────────────────────────────────────────────────────────────
+app.get('/api/profile', requireAuth, (req, res) => {
+  const user = store.getUserById(req.user.id);
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  return res.json(clientUser(user));
 });
 
-app.put('/api/profile', requireAuth, async (req, res) => {
-  const { username, avatar_url, dob, country, is_private } = req.body;
+app.put('/api/profile', express.json(), requireAuth, (req, res) => {
+  const { username, avatar_url, country } = req.body;
   const cleanUsername = username?.trim().toLowerCase().replace(/[^a-z0-9_]/g, '');
-
-  if (!cleanUsername) {
-    return res.status(400).json({ error: 'Username is required' });
-  }
+  if (!cleanUsername) return res.status(400).json({ error: 'Username is required' });
 
   try {
-    const existing = await getUserByUsername(cleanUsername);
-    if (existing && existing.email !== req.user.email) {
+    const existing = store.getUserByUsername(cleanUsername);
+    if (existing && existing.id !== req.user.id) {
       return res.status(400).json({ error: 'Username is already taken' });
     }
+    const current = store.getUserById(req.user.id);
+    if (!current) return res.status(404).json({ error: 'User not found' });
 
-    const currentProfile = await getUserByEmail(req.user.email);
-    if (!currentProfile) {
-      return res.status(404).json({ error: 'Profile not found' });
-    }
-
-    const updatedUser = {
-      ...currentProfile,
+    const updated = {
+      id: current.id,
       username: cleanUsername,
-      avatarUrl: avatar_url !== undefined ? avatar_url : (currentProfile.avatarUrl || ''),
-      dob: dob !== undefined ? dob : currentProfile.dob,
-      country: country !== undefined ? country : currentProfile.country,
-      isPrivate: is_private !== undefined ? is_private : (currentProfile.isPrivate || false)
+      avatarUrl: avatar_url !== undefined ? avatar_url : current.avatarUrl,
+      country: country !== undefined ? country : current.country,
     };
-
-    await ddbDocClient.send(new PutCommand({
-      TableName: 'watch_party_users',
-      Item: updatedUser
-    }));
-
-    console.log(`[PROFILE] Profile updated for: ${cleanUsername}`);
-    const { passwordHash, ...profile } = updatedUser;
-    return res.json({
-      ...profile,
-      avatar_url: updatedUser.avatarUrl || '',
-      is_private: updatedUser.isPrivate || false,
-      is_verified: updatedUser.isVerified || false
-    });
+    store.updateUser(updated);
+    return res.json(clientUser({ ...current, ...updated }));
   } catch (err) {
     console.error('[API Update Profile Error]', err);
     return res.status(500).json({ error: 'Failed to update profile' });
   }
 });
 
-// ─── Friendships API Routes ──────────────────────────────────────────────────
-app.get('/api/friends/list', requireAuth, async (req, res) => {
+// Avatar upload — base64 JSON in, file in public/uploads/avatars out.
+// Next serves public/ statically, so the returned URL just works.
+app.post('/api/profile/upload-avatar', express.json({ limit: '6mb' }), requireAuth, (req, res) => {
+  const { data, filename } = req.body;
+  if (!data || !filename) return res.status(400).json({ error: 'Missing data or filename' });
   try {
-    const userId = req.user.id;
-    const [res1, res2] = await Promise.all([
-      ddbDocClient.send(new QueryCommand({
-        TableName: 'watch_party_friendships',
-        KeyConditionExpression: 'senderId = :uId',
-        ExpressionAttributeValues: {
-          ':uId': userId
-        }
-      })),
-      ddbDocClient.send(new QueryCommand({
-        TableName: 'watch_party_friendships',
-        IndexName: 'receiverId-index',
-        KeyConditionExpression: 'receiverId = :uId',
-        ExpressionAttributeValues: {
-          ':uId': userId
-        }
-      }))
-    ]);
-
-    const friendships = [...(res1.Items || []), ...(res2.Items || [])];
-    const usersMap = await getAllUsersMap();
-
-    const formatted = friendships.map(rel => {
-      const sender = usersMap[rel.senderId] || { id: rel.senderId, username: rel.senderUsername || 'Unknown', avatarUrl: '', country: '' };
-      const receiver = usersMap[rel.receiverId] || { id: rel.receiverId, username: rel.receiverUsername || 'Unknown', avatarUrl: '', country: '' };
-
-      return {
-        id: rel.id,
-        sender_id: rel.senderId,
-        receiver_id: rel.receiverId,
-        status: rel.status,
-        sender: {
-          id: sender.id,
-          username: sender.username,
-          avatar_url: sender.avatarUrl || '',
-          country: sender.country || '',
-          isVerified: sender.isVerified || false
-        },
-        receiver: {
-          id: receiver.id,
-          username: receiver.username,
-          avatar_url: receiver.avatarUrl || '',
-          country: receiver.country || '',
-          isVerified: receiver.isVerified || false
-        }
-      };
-    });
-
-    return res.json(formatted);
+    const buffer = Buffer.from(data.replace(/^data:[^;]+;base64,/, ''), 'base64');
+    const ext = path.extname(filename) || '.jpg';
+    const uniqueFilename = `${req.user.id}-${Date.now()}${ext}`;
+    fs.writeFileSync(path.join(UPLOADS_DIR, 'avatars', uniqueFilename), buffer);
+    res.json({ url: `/uploads/avatars/${uniqueFilename}` });
   } catch (err) {
-    console.error('[API Friends List Error]', err);
-    return res.status(500).json({ error: 'Failed to fetch friendships' });
+    console.error('[Avatar Upload] Error:', err);
+    res.status(500).json({ error: 'Failed to upload avatar' });
   }
 });
 
-app.post('/api/friends/request', requireAuth, async (req, res) => {
-  const { receiverId } = req.body;
-  const senderId = req.user.id;
-
-  if (!receiverId) {
-    return res.status(400).json({ error: 'Receiver ID is required' });
-  }
-
-  if (senderId === receiverId) {
-    return res.status(400).json({ error: 'You cannot send a friend request to yourself' });
-  }
-
+// ─── Videos ──────────────────────────────────────────────────────────────────
+app.get('/api/videos', requireAuth, (req, res) => {
   try {
-    const usersMap = await getAllUsersMap();
-    const sender = usersMap[senderId];
-    const receiver = usersMap[receiverId];
-
-    if (!receiver || !sender) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-
-    const [res1, res2] = await Promise.all([
-      ddbDocClient.send(new QueryCommand({
-        TableName: 'watch_party_friendships',
-        KeyConditionExpression: 'senderId = :s AND receiverId = :r',
-        ExpressionAttributeValues: { ':s': senderId, ':r': receiverId }
-      })),
-      ddbDocClient.send(new QueryCommand({
-        TableName: 'watch_party_friendships',
-        KeyConditionExpression: 'senderId = :s AND receiverId = :r',
-        ExpressionAttributeValues: { ':s': receiverId, ':r': senderId }
-      }))
-    ]);
-
-    const existing = [...(res1.Items || []), ...(res2.Items || [])];
-    if (existing.length > 0) {
-      return res.status(400).json({ error: 'Friendship request already exists or you are already friends.' });
-    }
-
-    const friendshipId = crypto.randomUUID();
-    const newFriendship = {
-      senderId,
-      receiverId,
-      id: friendshipId,
-      status: 'pending',
-      senderUsername: sender.username,
-      receiverUsername: receiver.username,
-      createdAt: new Date().toISOString()
-    };
-
-    await ddbDocClient.send(new PutCommand({
-      TableName: 'watch_party_friendships',
-      Item: newFriendship
-    }));
-
-    console.log(`[FRIENDS] Request sent from ${sender.username} to ${receiver.username}`);
-    return res.json({ success: true, friendshipId });
-  } catch (err) {
-    console.error('[API Send Friend Request Error]', err);
-    return res.status(500).json({ error: 'Failed to send friend request' });
-  }
-});
-
-app.put('/api/friends/:friendshipId/accept', requireAuth, async (req, res) => {
-  const { friendshipId } = req.params;
-  try {
-    const scanRes = await ddbDocClient.send(new ScanCommand({
-      TableName: 'watch_party_friendships',
-      FilterExpression: 'id = :fid',
-      ExpressionAttributeValues: { ':fid': friendshipId }
-    }));
-
-    const friendship = scanRes.Items && scanRes.Items.length > 0 ? scanRes.Items[0] : null;
-    if (!friendship) {
-      return res.status(404).json({ error: 'Friendship record not found' });
-    }
-
-    if (friendship.receiverId !== req.user.id) {
-      return res.status(403).json({ error: 'Unauthorized to accept this request' });
-    }
-
-    friendship.status = 'accepted';
-    await ddbDocClient.send(new PutCommand({
-      TableName: 'watch_party_friendships',
-      Item: friendship
-    }));
-
-    console.log(`[FRIENDS] Friendship accepted: ${friendshipId}`);
-    return res.json({ success: true });
-  } catch (err) {
-    console.error('[API Accept Friend Request Error]', err);
-    return res.status(500).json({ error: 'Failed to accept friend request' });
-  }
-});
-
-app.delete('/api/friends/:friendshipId', requireAuth, async (req, res) => {
-  const { friendshipId } = req.params;
-  try {
-    const scanRes = await ddbDocClient.send(new ScanCommand({
-      TableName: 'watch_party_friendships',
-      FilterExpression: 'id = :fid',
-      ExpressionAttributeValues: { ':fid': friendshipId }
-    }));
-
-    const friendship = scanRes.Items && scanRes.Items.length > 0 ? scanRes.Items[0] : null;
-    if (!friendship) {
-      return res.status(404).json({ error: 'Friendship record not found' });
-    }
-
-    if (friendship.senderId !== req.user.id && friendship.receiverId !== req.user.id) {
-      return res.status(403).json({ error: 'Unauthorized to delete this friendship' });
-    }
-
-    await ddbDocClient.send(new DeleteCommand({
-      TableName: 'watch_party_friendships',
-      Key: {
-        senderId: friendship.senderId,
-        receiverId: friendship.receiverId
-      }
-    }));
-
-    console.log(`[FRIENDS] Friendship record deleted: ${friendshipId}`);
-    return res.json({ success: true });
-  } catch (err) {
-    console.error('[API Delete Friendship Error]', err);
-    return res.status(500).json({ error: 'Failed to delete friendship' });
-  }
-});
-
-// ─── Users Search API Route ──────────────────────────────────────────────────
-app.get('/api/users/search', requireAuth, async (req, res) => {
-  const { q } = req.query;
-  if (!q || !q.trim()) {
-    return res.json([]);
-  }
-  try {
-    const cleanQ = q.trim().toLowerCase();
-    const scanRes = await ddbDocClient.send(new ScanCommand({
-      TableName: 'watch_party_users'
-    }));
-
-    const results = (scanRes.Items || [])
-      .filter(user => user.id !== req.user.id && user.username.toLowerCase().includes(cleanQ))
-      .map(user => ({
-        id: user.id,
-        username: user.username,
-        avatar_url: user.avatarUrl || '',
-        country: user.country || '',
-        is_private: user.isPrivate || false,
-        isVerified: user.isVerified || false
-      }));
-
-    return res.json(results);
-  } catch (err) {
-    console.error('[API Search Users Error]', err);
-    return res.status(500).json({ error: 'Failed to search users' });
-  }
-});
-
-// ─── Socket.IO ───────────────────────────────────────────────────────────────
-const io = new Server(server, {
-  cors: {
-    origin: '*',
-    methods: ['GET', 'POST'],
-  },
-  pingTimeout: 60000,
-  pingInterval: 25000,
-  transports: ['websocket', 'polling'],
-});
-
-// ─── Video APIs ──────────────────────────────────────────────────────────────
-
-// List available videos (Filtered by RLS policies)
-app.get('/api/videos', requireAuth, async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const friendIds = await getAcceptedFriends(userId);
-    const usersMap = await getAllUsersMap();
-
-    const videosRes = await ddbDocClient.send(new ScanCommand({
-      TableName: 'watch_party_videos'
-    }));
-
-    const dbVideos = videosRes.Items || [];
-
-    const filteredVideos = dbVideos.filter(v => {
-      if (v.uploaderId === userId) return true;
-      const uploader = usersMap[v.uploaderId];
-      const uploaderIsPrivate = uploader?.isPrivate || false;
-
-      if (friendIds.includes(v.uploaderId)) return true;
-
-      return !v.isPrivate && !uploaderIsPrivate;
-    });
-
-    const formatted = filteredVideos.map(v => {
-      const uploader = usersMap[v.uploaderId];
-      return {
-        key: `videos/${v.filename}`,
-        name: v.displayName || v.filename,
-        size: 0,
-        uploaderId: v.uploaderId,
-        uploaderName: uploader?.username || 'Unknown',
-        country: uploader?.country || '',
-        avatarUrl: uploader?.avatarUrl || '',
-        isPrivate: v.isPrivate || false,
-        isVerified: uploader?.isVerified || false,
-        thumbnailUrl: v.thumbnailUrl || ''
-      };
-    });
-
-    // Sort by createdAt descending
-    formatted.sort((a, b) => {
-      const vA = dbVideos.find(v => `videos/${v.filename}` === a.key);
-      const vB = dbVideos.find(v => `videos/${v.filename}` === b.key);
-      return new Date(vB?.createdAt || 0) - new Date(vA?.createdAt || 0);
-    });
-
-    res.json(formatted);
+    const videos = store.listVideos()
+      .filter(v => !v.isPrivate || v.uploaderId === req.user.id)
+      .map(v => {
+        const uploader = store.getUserById(v.uploaderId);
+        return {
+          key: `videos/${v.filename}`,
+          name: v.displayName || v.filename,
+          size: 0,
+          uploaderId: v.uploaderId,
+          uploaderName: uploader?.username || v.uploaderName || 'Unknown',
+          country: uploader?.country || '',
+          avatarUrl: uploader?.avatarUrl || '',
+          isPrivate: !!v.isPrivate,
+          isVerified: false,
+          thumbnailUrl: v.thumbnailUrl || '',
+          createdAt: v.createdAt,
+        };
+      });
+    res.json(videos);
   } catch (err) {
     console.error('[API] Error listing videos:', err.message);
-    res.status(500).json({ error: 'Failed to list videos', details: err.message });
+    res.status(500).json({ error: 'Failed to list videos' });
   }
 });
 
-// Get a video URL (pre-signed for S3, direct path for local, HLS if available)
-app.get('/api/video-url', async (req, res) => {
+// Resolve a playable URL for a video key: HLS if transcoded, range stream otherwise
+app.get('/api/video-url', (req, res) => {
   const key = req.query.key;
-  const roomId = req.query.roomId;
-
   if (!key) return res.status(400).json({ error: 'Missing key' });
 
-  // 1. Check if the video is allowed to be viewed
-  let allowed = false;
+  const baseFilename = key.replace(/^videos\//, '');
+  const video = store.getVideo(baseFilename);
+  if (!video) return res.status(404).json({ error: 'Video not found' });
 
-  // Check Option A: Active video in room session
-  if (roomId && rooms[roomId]) {
-    const roomState = rooms[roomId].state;
-    if (roomState && roomState.videoKey === key) {
-      allowed = true;
-    }
-  }
-
-  // Check Option B: Direct permission via database RLS policy
-  if (!allowed) {
-    const authHeader = req.headers.authorization;
-    const token = authHeader && authHeader.split(' ')[1];
+  // Private videos: playable inside a room session (host shared it) or by uploader
+  if (video.isPrivate) {
+    const roomId = req.query.roomId;
+    const inRoom = roomId && rooms[roomId]?.state?.videoKey === key;
+    let isUploader = false;
+    const token = req.headers.authorization?.split(' ')[1];
     if (token) {
-      try {
-        const decoded = jwt.verify(token, JWT_SECRET);
-        const baseFilename = key.replace(/^videos\//, '');
-        const videoRes = await ddbDocClient.send(new GetCommand({
-          TableName: 'watch_party_videos',
-          Key: { filename: baseFilename }
-        }));
-        const video = videoRes.Item;
-        if (video) {
-          const viewerId = decoded.id;
-          if (video.uploaderId === viewerId) {
-            allowed = true;
-          } else {
-            const friendIds = await getAcceptedFriends(viewerId);
-            if (friendIds.includes(video.uploaderId)) {
-              allowed = true;
-            } else {
-              const uploader = await getUserById(video.uploaderId);
-              const uploaderIsPrivate = uploader?.isPrivate || false;
-              if (!video.isPrivate && !uploaderIsPrivate) {
-                allowed = true;
-              }
-            }
-          }
-        }
-      } catch (err) {
-        console.error('[API] Auth check failed for video-url:', err.message);
-      }
+      try { isUploader = jwt.verify(token, JWT_SECRET).id === video.uploaderId; } catch {}
+    }
+    if (!inRoom && !isUploader) {
+      return res.status(403).json({ error: 'Forbidden: No permission to stream this video.' });
     }
   }
 
-  if (!allowed) {
-    return res.status(403).json({ error: 'Forbidden: No permission to stream this video.' });
+  const baseName = path.parse(baseFilename).name;
+  const hlsManifest = path.join(HLS_DIR, baseName, 'index.m3u8');
+  if (fs.existsSync(hlsManifest)) {
+    return res.json({ url: `/api/hls/${encodeURIComponent(baseName)}/index.m3u8`, source: 'hls' });
   }
-
-  try {
-    if (VIDEO_SOURCE === 's3') {
-      const baseName = path.parse(key).name;
-      const hlsManifestKey = `videos/hls/${baseName}/index.m3u8`;
-
-      // Check if HLS version exists in S3
-      let hasHLS = false;
-      try {
-        await s3Client.send(new HeadObjectCommand({
-          Bucket: S3_BUCKET,
-          Key: hlsManifestKey
-        }));
-        hasHLS = true;
-      } catch (err) {
-        if (err.name !== 'NotFound') {
-          console.error(`[S3 HEAD] Error checking HLS manifest ${hlsManifestKey}:`, err);
-        }
-        // HLS manifest doesn't exist or other error, fallback to raw
-      }
-
-      if (hasHLS) {
-        return res.json({ url: `/api/hls-s3/${encodeURIComponent(baseName)}/index.m3u8`, source: 'hls' });
-      }
-
-      const ext = path.extname(key).toLowerCase();
-      const contentTypes = {
-        '.mp4': 'video/mp4',
-        '.webm': 'video/webm',
-        '.ogg': 'video/ogg',
-        '.mov': 'video/quicktime',
-        '.mkv': 'video/x-matroska',
-        '.avi': 'video/x-msvideo',
-      };
-      const ResponseContentType = contentTypes[ext] || 'video/mp4';
-
-      const command = new GetObjectCommand({ 
-        Bucket: S3_BUCKET, 
-        Key: key,
-        ResponseContentType
-      });
-      const url = await getSignedUrl(s3Client, command, { expiresIn: 7200 });
-      return res.json({ url, source: 's3' });
-    }
-
-    // Local: check if HLS version exists
-    const baseName = path.parse(key).name;
-    const hlsDir = path.join(__dirname, 'videos', 'hls', baseName);
-    const hlsManifest = path.join(hlsDir, 'index.m3u8');
-    if (fs.existsSync(hlsManifest)) {
-      return res.json({ url: `/api/hls/${encodeURIComponent(baseName)}/index.m3u8`, source: 'hls' });
-    }
-
-    // Fallback: range streaming. Strip the videos/ prefix — the stream route
-    // already resolves inside the videos dir, so keeping it 404s every local video.
-    res.json({ url: `/api/stream/${encodeURIComponent(key.replace(/^videos\//, ''))}`, source: 'local' });
-  } catch (err) {
-    console.error('[API] Error getting video URL:', err);
-    res.status(500).json({ error: 'Failed to get video URL' });
-  }
+  res.json({ url: `/api/stream/${encodeURIComponent(baseFilename)}`, source: 'local' });
 });
 
-// Stream local video with Range support (HTTP 206)
+// Range streaming (HTTP 206) for raw files
 app.get('/api/stream/:filename', (req, res) => {
   const filename = decodeURIComponent(req.params.filename);
-  const filePath = path.join(__dirname, 'videos', filename);
+  const filePath = path.join(VIDEOS_DIR, path.basename(filename));
 
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).json({ error: 'File not found' });
-  }
+  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File not found' });
 
-  const stat = fs.statSync(filePath);
-  const fileSize = stat.size;
-
-  // Content type mapping
+  const fileSize = fs.statSync(filePath).size;
   const ext = path.extname(filename).toLowerCase();
   const contentTypes = {
-    '.mp4': 'video/mp4',
-    '.webm': 'video/webm',
-    '.ogg': 'video/ogg',
-    '.mov': 'video/quicktime',
-    '.mkv': 'video/x-matroska',
+    '.mp4': 'video/mp4', '.webm': 'video/webm', '.ogg': 'video/ogg',
+    '.mov': 'video/quicktime', '.mkv': 'video/x-matroska', '.avi': 'video/x-msvideo',
   };
   const contentType = contentTypes[ext] || 'video/mp4';
 
@@ -816,47 +231,23 @@ app.get('/api/stream/:filename', (req, res) => {
     const parts = range.replace(/bytes=/, '').split('-');
     let start = parseInt(parts[0], 10);
     let end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-
-    // Handle suffix range requests (e.g. bytes=-500)
-    if (isNaN(start)) {
-      start = fileSize - end;
-      end = fileSize - 1;
-    }
-
-    // Handle invalid/out-of-bounds ranges
-    if (isNaN(end)) {
-      end = fileSize - 1;
-    }
-
-    if (start >= fileSize || end >= fileSize || start < 0 || end < 0 || start > end) {
-      res.writeHead(416, {
-        'Content-Range': `bytes */${fileSize}`,
-        'Content-Type': contentType,
-      });
+    if (isNaN(start)) { start = fileSize - end; end = fileSize - 1; }
+    if (isNaN(end)) end = fileSize - 1;
+    if (start >= fileSize || end >= fileSize || start < 0 || start > end) {
+      res.writeHead(416, { 'Content-Range': `bytes */${fileSize}` });
       return res.end();
     }
-
-    const chunkSize = end - start + 1;
-    const file = fs.createReadStream(filePath, { start, end });
-
-    file.on('error', (err) => {
-      console.error(`[STREAM ERROR] Failed to stream file: ${err.message}`);
-      if (!res.headersSent) {
-        res.writeHead(500, { 'Content-Type': 'text/plain' });
-        res.end('Internal Server Error');
-      }
-    });
-
     res.writeHead(206, {
       'Content-Range': `bytes ${start}-${end}/${fileSize}`,
       'Accept-Ranges': 'bytes',
-      'Content-Length': chunkSize,
+      'Content-Length': end - start + 1,
       'Content-Type': contentType,
       'Cache-Control': 'public, max-age=3600',
     });
+    const file = fs.createReadStream(filePath, { start, end });
+    file.on('error', () => { if (!res.headersSent) res.status(500).end(); res.end(); });
     file.pipe(res);
   } else {
-    // No range: send entire file
     res.writeHead(200, {
       'Content-Length': fileSize,
       'Content-Type': contentType,
@@ -864,312 +255,28 @@ app.get('/api/stream/:filename', (req, res) => {
       'Cache-Control': 'public, max-age=3600',
     });
     const file = fs.createReadStream(filePath);
-    file.on('error', (err) => {
-      console.error(`[STREAM ERROR] Failed to stream whole file: ${err.message}`);
-      if (!res.headersSent) {
-        res.writeHead(500, { 'Content-Type': 'text/plain' });
-        res.end('Internal Server Error');
-      }
-    });
+    file.on('error', () => { if (!res.headersSent) res.status(500).end(); res.end(); });
     file.pipe(res);
   }
 });
 
-// ─── HLS Segment Serving ────────────────────────────────────────────────────
+// HLS manifest + segment serving
 app.get('/api/hls/:videoname/:file', (req, res) => {
-  const { videoname, file } = req.params;
-  const safeName = decodeURIComponent(videoname).replace(/[^a-zA-Z0-9_\-. ]/g, '');
-  const safeFile = decodeURIComponent(file).replace(/[^a-zA-Z0-9_\-.]/g, '');
-  const filePath = path.join(__dirname, 'videos', 'hls', safeName, safeFile);
-
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).json({ error: 'HLS file not found' });
-  }
+  const safeName = decodeURIComponent(req.params.videoname).replace(/[^a-zA-Z0-9_\-. ]/g, '');
+  const safeFile = decodeURIComponent(req.params.file).replace(/[^a-zA-Z0-9_\-.]/g, '');
+  const filePath = path.join(HLS_DIR, safeName, safeFile);
+  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'HLS file not found' });
 
   const ext = path.extname(safeFile).toLowerCase();
-  const maxAge = ext === '.m3u8' ? 0 : 31536000;
-  const cacheControl = ext === '.m3u8' ? 'no-cache' : `public, max-age=${maxAge}`;
-
   res.sendFile(filePath, {
-    headers: {
-      'Cache-Control': cacheControl,
-      'Access-Control-Allow-Origin': '*',
-    }
+    headers: { 'Cache-Control': ext === '.m3u8' ? 'no-cache' : 'public, max-age=31536000' },
   });
 });
 
-// ─── HLS Serving from S3 ────────────────────────────────────────────────────
-// Manifests (.m3u8, tiny text) are proxied so relative segment URIs resolve here.
-// Segments (.ts, the actual video bytes) are 302-redirected to presigned S3 URLs —
-// proxying them pegged the CPU on small instances since every viewer's entire
-// stream flowed through this process. A redirect costs one local HMAC signature.
-app.get('/api/hls-s3/:videoname/:file', async (req, res) => {
-  const { videoname, file } = req.params;
-  const safeName = decodeURIComponent(videoname).replace(/[^a-zA-Z0-9_\-. ]/g, '');
-  const safeFile = decodeURIComponent(file).replace(/[^a-zA-Z0-9_\-.]/g, '');
-  const s3Key = `videos/hls/${safeName}/${safeFile}`;
+// ─── Upload (local, streaming to disk) ──────────────────────────────────────
+const uploads = {}; // uploadId -> { filename, status, tsCreated, errorMessage }
 
-  try {
-    const ext = path.extname(safeFile).toLowerCase();
-
-    if (ext !== '.m3u8') {
-      const url = await getSignedUrl(s3Client, new GetObjectCommand({
-        Bucket: S3_BUCKET,
-        Key: s3Key,
-      }), { expiresIn: 7200 });
-      return res.redirect(302, url);
-    }
-
-    const mimeTypes = {
-      '.m3u8': 'application/vnd.apple.mpegurl',
-      '.ts': 'video/mp2t',
-    };
-    const contentType = mimeTypes[ext] || 'application/octet-stream';
-
-    const command = new GetObjectCommand({
-      Bucket: S3_BUCKET,
-      Key: s3Key,
-    });
-
-    const s3Response = await s3Client.send(command);
-
-    // Manual HTTP 304 handling if client has the same version
-    const s3ETag = s3Response.ETag;
-    const clientETag = req.headers['if-none-match'];
-    if (clientETag && clientETag === s3ETag) {
-      res.status(304).end();
-      return;
-    }
-
-    const clientIfModifiedSince = req.headers['if-modified-since'];
-    if (clientIfModifiedSince && s3Response.LastModified) {
-      const clientTime = new Date(clientIfModifiedSince).getTime();
-      const s3Time = new Date(s3Response.LastModified).getTime();
-      if (s3Time <= clientTime) {
-        res.status(304).end();
-        return;
-      }
-    }
-
-    const headers = {
-      'Content-Type': contentType,
-      'Content-Length': s3Response.ContentLength,
-      'Cache-Control': ext === '.m3u8' ? 'no-cache' : 'public, max-age=31536000',
-      'Access-Control-Allow-Origin': '*',
-    };
-
-    if (s3ETag) headers['ETag'] = s3ETag;
-    if (s3Response.LastModified) {
-      headers['Last-Modified'] = new Date(s3Response.LastModified).toUTCString();
-    }
-
-    res.writeHead(200, headers);
-
-    if (s3Response.Body && typeof s3Response.Body.pipe === 'function') {
-      s3Response.Body.pipe(res);
-    } else if (s3Response.Body) {
-      const buffer = await s3Response.Body.transformToByteArray();
-      res.end(Buffer.from(buffer));
-    } else {
-      res.status(404).send('HLS segment not found');
-    }
-  } catch (err) {
-    console.error(`[HLS-S3 PROXY ERROR] Failed to fetch ${s3Key}:`, err.message);
-    res.status(404).send('HLS segment not found');
-  }
-});
-
-// Trigger AWS Elemental MediaConvert Job
-async function triggerMediaConvertJob(filename, baseName, ext) {
-  if (!mediaConvertClient) {
-    throw new Error('MediaConvert client is not initialized');
-  }
-  if (!process.env.AWS_MEDIACONVERT_ROLE_ARN) {
-    throw new Error('AWS_MEDIACONVERT_ROLE_ARN environment variable is not set');
-  }
-
-  const { CreateJobCommand } = require('@aws-sdk/client-mediaconvert');
-  const roleArn = process.env.AWS_MEDIACONVERT_ROLE_ARN.trim();
-  const inputPath = `s3://${S3_BUCKET}/videos/${filename}`;
-  const outputPath = `s3://${S3_BUCKET}/videos/hls/${baseName}/index`;
-
-  const jobParams = {
-    Role: roleArn,
-    Settings: {
-      Inputs: [
-        {
-          FileInput: inputPath,
-          AudioSelectors: {
-            "Audio Selector 1": {
-              DefaultSelection: "DEFAULT"
-            }
-          },
-          VideoSelector: {},
-          TimecodeSource: "ZEROBASED"
-        }
-      ],
-      OutputGroups: [
-        {
-          CustomName: "HLS Output",
-          Name: "Apple HLS",
-          OutputGroupSettings: {
-            Type: "HLS_GROUP_SETTINGS",
-            HlsGroupSettings: {
-              SegmentLength: 4,
-              MinSegmentLength: 0,
-              Destination: outputPath,
-              DirectoryStructure: "SINGLE_DIRECTORY",
-              ManifestDurationFormat: "FLOATING_POINT"
-            }
-          },
-          Outputs: [
-            {
-              // Required by the API — omitting it rejects the job with
-              // "containerSettings is a required property"
-              ContainerSettings: { Container: "M3U8", M3u8Settings: {} },
-              VideoDescription: {
-                CodecSettings: {
-                  Codec: "H_264",
-                  H264Settings: {
-                    RateControlMode: "QVBR",
-                    SceneChangeDetect: "ENABLED",
-                    MaxBitrate: 5000000,
-                    QvbrSettings: {
-                      QvbrQualityLevel: 7
-                    },
-                    GopSize: 90,
-                    GopSizeUnits: "FRAMES"
-                  }
-                },
-                Width: 1280,
-                Height: 720
-              },
-              AudioDescriptions: [
-                {
-                  CodecSettings: {
-                    Codec: "AAC",
-                    AacSettings: {
-                      Bitrate: 96000,
-                      CodingMode: "CODING_MODE_2_0",
-                      SampleRate: 48000
-                    }
-                  }
-                }
-              ],
-              OutputSettings: {
-                HlsSettings: {}
-              },
-              NameModifier: "_720p"
-            }
-          ]
-        }
-      ]
-    }
-  };
-
-  const command = new CreateJobCommand(jobParams);
-  const response = await mediaConvertClient.send(command);
-  return response.Job.Id;
-}
-
-// ─── Avatar Upload & Serving ──────────────────────────────────────────────────
-
-// Upload custom profile avatar image
-app.post('/api/profile/upload-avatar', express.json({ limit: '6mb' }), requireAuth, async (req, res) => {
-  const { data, filename, contentType } = req.body;
-  if (!data || !filename) {
-    return res.status(400).json({ error: 'Missing data or filename' });
-  }
-
-  try {
-    const base64Data = data.replace(/^data:[^;]+;base64,/, "");
-    const buffer = Buffer.from(base64Data, 'base64');
-    
-    // Generate unique filename to avoid collision
-    const ext = path.extname(filename) || '.jpg';
-    const uniqueFilename = `${req.user.id}-${Date.now()}${ext}`;
-
-    if (s3Client && S3_BUCKET) {
-      const s3Key = `avatars/${uniqueFilename}`;
-      await s3Client.send(new PutObjectCommand({
-        Bucket: S3_BUCKET,
-        Key: s3Key,
-        Body: buffer,
-        ContentType: contentType || 'image/jpeg'
-      }));
-      const avatarUrl = `/api/avatar/${uniqueFilename}`;
-      res.json({ url: avatarUrl });
-    } else {
-      const avatarsDir = path.join(__dirname, 'public', 'uploads', 'avatars');
-      if (!fs.existsSync(avatarsDir)) {
-        fs.mkdirSync(avatarsDir, { recursive: true });
-      }
-      fs.writeFileSync(path.join(avatarsDir, uniqueFilename), buffer);
-      const avatarUrl = `/uploads/avatars/${uniqueFilename}`;
-      res.json({ url: avatarUrl });
-    }
-  } catch (err) {
-    console.error('[Avatar Upload] Error:', err);
-    res.status(500).json({ error: 'Failed to upload avatar', details: err.message });
-  }
-});
-
-// Serve profile avatar (especially for S3 storage)
-app.get('/api/avatar/:filename', async (req, res) => {
-  const filename = req.params.filename;
-  try {
-    if (s3Client && S3_BUCKET) {
-      const command = new GetObjectCommand({
-        Bucket: S3_BUCKET,
-        Key: `avatars/${filename}`
-      });
-      const s3Res = await s3Client.send(command);
-      res.setHeader('Content-Type', s3Res.ContentType || 'image/jpeg');
-      res.setHeader('Cache-Control', 'public, max-age=31536000'); // Cache for 1 year
-      s3Res.Body.pipe(res);
-    } else {
-      const filePath = path.join(__dirname, 'public', 'uploads', 'avatars', filename);
-      if (fs.existsSync(filePath)) {
-        res.sendFile(filePath);
-      } else {
-        res.status(404).send('Not found');
-      }
-    }
-  } catch (err) {
-    res.status(404).send('Avatar not found');
-  }
-});
-
-// Serve video thumbnail (especially for S3 storage)
-app.get('/api/thumbnail/:filename', async (req, res) => {
-  const filename = req.params.filename;
-  try {
-    if (s3Client && S3_BUCKET) {
-      const command = new GetObjectCommand({
-        Bucket: S3_BUCKET,
-        Key: `thumbnails/${filename}`
-      });
-      const s3Res = await s3Client.send(command);
-      res.setHeader('Content-Type', s3Res.ContentType || 'image/jpeg');
-      res.setHeader('Cache-Control', 'public, max-age=31536000'); // Cache for 1 year
-      s3Res.Body.pipe(res);
-    } else {
-      const filePath = path.join(__dirname, 'public', 'uploads', 'thumbnails', filename);
-      if (fs.existsSync(filePath)) {
-        res.sendFile(filePath);
-      } else {
-        res.status(404).send('Not found');
-      }
-    }
-  } catch (err) {
-    res.status(404).send('Thumbnail not found');
-  }
-});
-
-// ─── Upload Session Tracking ────────────────────────────────────────────────
-const uploads = {}; // { uploadId: { filename, s3Key, fileSize, status, createdAt, jobId } }
-
-// Sweep stale upload sessions so the map never grows unbounded
+// Sweep finished/stale sessions daily
 setInterval(() => {
   const cutoff = Date.now() - 24 * 60 * 60 * 1000;
   for (const [id, u] of Object.entries(uploads)) {
@@ -1177,472 +284,214 @@ setInterval(() => {
   }
 }, 60 * 60 * 1000);
 
-// ─── S3 Direct Multipart Upload System ───
-// Initialize multipart upload on S3
-app.post('/api/upload/multipart/initiate', express.json(), requireAuth, async (req, res) => {
-  const { filename, fileSize } = req.body;
-  if (!filename) {
-    return res.status(400).json({ error: 'Missing filename' });
+// Thumbnail upload (base64 JSON) — returns a static URL to attach to the video
+app.post('/api/upload/thumbnail', express.json({ limit: '10mb' }), requireAuth, (req, res) => {
+  const { data, filename, contentType } = req.body;
+  if (!data || !filename) return res.status(400).json({ error: 'Missing data or filename' });
+  try {
+    const buffer = Buffer.from(data.replace(/^data:[^;]+;base64,/, ''), 'base64');
+    const ext = path.extname(filename) || '.jpg';
+    const uniqueName = `${req.user.id}-${Date.now()}${ext}`;
+    fs.writeFileSync(path.join(UPLOADS_DIR, 'thumbnails', uniqueName), buffer);
+    res.json({ url: `/uploads/thumbnails/${uniqueName}` });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to save thumbnail' });
   }
+});
 
-  if (!/\.(mp4|webm|ogg|mov|mkv|avi)$/i.test(filename)) {
+// The video upload itself: raw bytes streamed straight to disk — constant
+// memory regardless of file size. Metadata rides in query params.
+app.post('/api/upload/local', requireAuth, (req, res) => {
+  const rawName = (req.query.filename || '').toString();
+  if (!/\.(mp4|webm|ogg|mov|mkv|avi)$/i.test(rawName)) {
     return res.status(400).json({ error: 'Invalid file type. Supported: mp4, webm, ogg, mov, mkv, avi' });
   }
 
-  // 6 GB Limit Check
-  const maxBytes = 6 * 1024 * 1024 * 1024;
-  if (fileSize && parseInt(fileSize, 10) > maxBytes) {
-    return res.status(400).json({ error: 'File size exceeds the 6 GB upload limit.' });
+  const ext = path.extname(rawName).toLowerCase();
+  const rawDisplayName = (req.query.displayName || path.parse(rawName).name).toString();
+  const baseNameInput = rawDisplayName.replace(/[^a-zA-Z0-9_\-.() ]/g, '_');
+
+  // Collision check against DB, disk, and in-flight uploads
+  const inFlight = new Set(Object.values(uploads).filter(u => u.status !== 'error').map(u => u.filename));
+  let finalFilename = `${baseNameInput}${ext}`;
+  let counter = 1;
+  while (store.getVideo(finalFilename) || fs.existsSync(path.join(VIDEOS_DIR, finalFilename)) || inFlight.has(finalFilename)) {
+    finalFilename = `${baseNameInput}-${counter}${ext}`;
+    counter++;
   }
 
-  if (!s3Client || !S3_BUCKET) {
-    return res.status(400).json({ error: 'S3 storage is not configured. Direct upload disabled.' });
-  }
+  const uploadId = crypto.randomUUID();
+  uploads[uploadId] = { filename: finalFilename, status: 'uploading', tsCreated: 0, createdAt: Date.now() };
 
-  try {
-    const ext = path.extname(filename).toLowerCase();
-    const rawDisplayName = req.body.displayName || path.parse(filename).name;
-    const cleanBaseName = rawDisplayName.toLowerCase().endsWith(ext)
-      ? path.parse(rawDisplayName).name
-      : rawDisplayName;
-    const baseNameInput = cleanBaseName.replace(/[^a-zA-Z0-9_\-.() ]/g, '_');
+  const finalPath = path.join(VIDEOS_DIR, finalFilename);
+  const writeStream = fs.createWriteStream(finalPath);
+  req.pipe(writeStream);
 
-    // Collision check in DynamoDB
-    const checkVideoExists = async (fname) => {
-      try {
-        const res = await ddbDocClient.send(new GetCommand({
-          TableName: 'watch_party_videos',
-          Key: { filename: fname }
-        }));
-        return !!res.Item;
-      } catch {
-        return false;
-      }
-    };
+  req.on('aborted', () => {
+    writeStream.destroy();
+    fs.unlink(finalPath, () => {});
+    uploads[uploadId].status = 'error';
+    uploads[uploadId].errorMessage = 'Upload aborted';
+  });
 
-    // Also reserve against in-flight sessions — with concurrent uploads, two
-    // same-named files could otherwise both pass the DB check and collide.
-    const inFlightNames = new Set(
-      Object.values(uploads)
-        .filter(u => u.status !== 'error')
-        .map(u => u.filename)
-    );
+  writeStream.on('error', (err) => {
+    console.error('[UPLOAD] Write error:', err.message);
+    uploads[uploadId].status = 'error';
+    uploads[uploadId].errorMessage = err.message;
+    res.status(500).json({ error: 'Failed to write file' });
+  });
 
-    let finalFilename = `${baseNameInput}${ext}`;
-    let counter = 1;
-    while (inFlightNames.has(finalFilename) || await checkVideoExists(finalFilename)) {
-      finalFilename = `${baseNameInput}-${counter}${ext}`;
-      counter++;
-    }
+  writeStream.on('finish', () => {
+    if (uploads[uploadId].status === 'error') return;
+    console.log(`[UPLOAD] Saved: ${finalFilename} (${(fs.statSync(finalPath).size / 1e6).toFixed(1)}MB)`);
 
-    const s3Key = `videos/${finalFilename}`;
-    const contentTypes = {
-      '.mp4': 'video/mp4',
-      '.webm': 'video/webm',
-      '.ogg': 'video/ogg',
-      '.mov': 'video/quicktime',
-      '.mkv': 'video/x-matroska',
-      '.avi': 'video/x-msvideo',
-    };
-    const contentType = contentTypes[ext] || 'video/mp4';
-
-    const command = new CreateMultipartUploadCommand({
-      Bucket: S3_BUCKET,
-      Key: s3Key,
-      ContentType: contentType,
-    });
-    const response = await s3Client.send(command);
-
-    // Track the session
-    uploads[response.UploadId] = {
+    // Register immediately — video is playable raw right away
+    const displayNameFinal = rawDisplayName.toLowerCase().endsWith(ext) ? rawDisplayName : `${rawDisplayName}${ext}`;
+    store.insertVideo({
       filename: finalFilename,
-      s3Key,
-      fileSize: parseInt(fileSize, 10) || 0,
-      status: 'uploading',
-      createdAt: Date.now(),
-    };
-
-    console.log(`[MULTIPART UPLOAD] Initiated S3 Multipart: ${response.UploadId} | Key: ${s3Key}`);
-    res.json({
-      uploadId: response.UploadId,
-      key: s3Key,
-      targetFilename: finalFilename
-    });
-  } catch (err) {
-    console.error('[MULTIPART UPLOAD] Initiation failed:', err);
-    res.status(500).json({ error: 'Failed to initiate multipart upload', details: err.message });
-  }
-});
-
-// Request presigned URLs for a batch of parts (signing is local HMAC — cheap)
-app.post('/api/upload/multipart/sign-parts', express.json(), requireAuth, async (req, res) => {
-  const { uploadId, key, partNumbers } = req.body;
-  if (!uploadId || !key || !Array.isArray(partNumbers) || partNumbers.length === 0) {
-    return res.status(400).json({ error: 'Missing uploadId, key, or partNumbers array' });
-  }
-  if (partNumbers.length > 200) {
-    return res.status(400).json({ error: 'Too many parts in one request (max 200)' });
-  }
-
-  const upload = uploads[uploadId];
-  if (!upload || upload.s3Key !== key) {
-    return res.status(404).json({ error: 'Upload session not found' });
-  }
-
-  try {
-    const urls = {};
-    await Promise.all(partNumbers.map(async (pn) => {
-      const command = new UploadPartCommand({
-        Bucket: S3_BUCKET,
-        Key: key,
-        UploadId: uploadId,
-        PartNumber: parseInt(pn, 10),
-      });
-      // 6h expiry so slow connections on big files don't outlive their URLs
-      urls[pn] = await getSignedUrl(s3Client, command, { expiresIn: 21600 });
-    }));
-    res.json({ urls });
-  } catch (err) {
-    console.error('[MULTIPART UPLOAD] Signing parts failed:', err);
-    res.status(500).json({ error: 'Failed to sign upload parts', details: err.message });
-  }
-});
-
-// Complete the multipart upload and start MediaConvert transcoding
-app.post('/api/upload/multipart/complete', express.json({ limit: '10mb' }), requireAuth, async (req, res) => {
-  const { uploadId, key, parts, displayName, isPrivate } = req.body;
-  if (!uploadId || !key || !parts) {
-    return res.status(400).json({ error: 'Missing uploadId, key, or parts' });
-  }
-
-  const upload = uploads[uploadId];
-  if (!upload) {
-    return res.status(404).json({ error: 'Upload session not found' });
-  }
-
-  upload.status = 'assembling';
-
-  // Process video thumbnail if provided
-  let finalThumbnailUrl = '';
-  const { thumbnailData, thumbnailFilename, thumbnailContentType, thumbnailUrl } = req.body;
-
-  if (thumbnailData && thumbnailFilename) {
-    try {
-      const base64Data = thumbnailData.replace(/^data:[^;]+;base64,/, "");
-      const buffer = Buffer.from(base64Data, 'base64');
-      const thumbExt = path.extname(thumbnailFilename) || '.jpg';
-      const uniqueThumbName = `${req.user.id}-${Date.now()}${thumbExt}`;
-
-      if (s3Client && S3_BUCKET) {
-        const s3Key = `thumbnails/${uniqueThumbName}`;
-        await s3Client.send(new PutObjectCommand({
-          Bucket: S3_BUCKET,
-          Key: s3Key,
-          Body: buffer,
-          ContentType: thumbnailContentType || 'image/jpeg'
-        }));
-        finalThumbnailUrl = `/api/thumbnail/${uniqueThumbName}`;
-        console.log(`[MULTIPART UPLOAD] Thumbnail uploaded to S3: ${s3Key}`);
-      } else {
-        const thumbsDir = path.join(__dirname, 'public', 'uploads', 'thumbnails');
-        if (!fs.existsSync(thumbsDir)) {
-          fs.mkdirSync(thumbsDir, { recursive: true });
-        }
-        fs.writeFileSync(path.join(thumbsDir, uniqueThumbName), buffer);
-        finalThumbnailUrl = `/uploads/thumbnails/${uniqueThumbName}`;
-      }
-    } catch (thumbErr) {
-      console.error(`[MULTIPART UPLOAD] Failed to process thumbnail file:`, thumbErr.message);
-    }
-  } else if (thumbnailUrl) {
-    finalThumbnailUrl = thumbnailUrl;
-  }
-
-  try {
-    console.log(`[MULTIPART UPLOAD] Completing S3 Multipart: ${uploadId}`);
-    // Complete multipart upload in S3
-    const completeCommand = new CompleteMultipartUploadCommand({
-      Bucket: S3_BUCKET,
-      Key: key,
-      UploadId: uploadId,
-      MultipartUpload: {
-        Parts: parts.map(p => ({
-          ETag: p.ETag,
-          PartNumber: parseInt(p.PartNumber, 10)
-        }))
-      }
-    });
-    await s3Client.send(completeCommand);
-    console.log(`[MULTIPART UPLOAD] Completed successfully on S3: ${upload.filename}`);
-
-    const ext = path.extname(upload.filename).toLowerCase();
-    const baseName = path.parse(upload.filename).name;
-
-    // Save video to DB immediately. Playback works from the raw file right away —
-    // /api/video-url auto-switches to HLS once the MediaConvert manifest appears in S3.
-    // This makes registration independent of the client staying online or server restarts.
-    const uploader = await getUserById(req.user.id);
-    const finalDisplayName = displayName || baseName;
-
-    const newVideo = {
-      filename: upload.filename,
       id: crypto.randomUUID(),
-      displayName: finalDisplayName.endsWith(ext) ? finalDisplayName : `${finalDisplayName}${ext}`,
+      displayName: displayNameFinal,
       uploaderId: req.user.id,
       uploaderName: req.user.username,
-      uploaderCountry: uploader?.country || '',
-      isPrivate: !!isPrivate,
+      isPrivate: req.query.isPrivate === 'true' ? 1 : 0,
+      thumbnailUrl: (req.query.thumbnailUrl || '').toString(),
       createdAt: new Date().toISOString(),
-      thumbnailUrl: finalThumbnailUrl || ''
-    };
+    });
 
-    await ddbDocClient.send(new PutCommand({
-      TableName: 'watch_party_videos',
-      Item: newVideo
-    }));
-    console.log(`[MULTIPART UPLOAD] Video registered in database: ${upload.filename}`);
-
-    // Trigger MediaConvert (optional enhancement — raw playback already works)
-    if (mediaConvertClient && process.env.AWS_MEDIACONVERT_ROLE_ARN) {
-      try {
-        upload.status = 'transcoding';
-        const jobId = await triggerMediaConvertJob(upload.filename, baseName, ext);
-        upload.jobId = jobId;
-        console.log(`[MULTIPART UPLOAD] MediaConvert Job submitted: ${jobId}`);
-        monitorMediaConvertJob(jobId, uploadId, upload);
-        return res.json({ status: 'transcoding', uploadId, filename: upload.filename, jobId });
-      } catch (mcErr) {
-        console.error(`[MULTIPART UPLOAD] MediaConvert submission failed (video stays raw):`, mcErr.message);
-      }
+    if (FFMPEG_PATH) {
+      uploads[uploadId].status = 'transcoding';
+      transcodeToHls(uploadId, finalPath, finalFilename);
+      res.json({ status: 'transcoding', uploadId, filename: finalFilename });
     } else {
-      console.log(`[MULTIPART UPLOAD] MediaConvert is not configured. Video will remain raw.`);
+      uploads[uploadId].status = 'complete';
+      io.emit('transcode-complete', { uploadId, filename: finalFilename });
+      res.json({ status: 'complete', uploadId, filename: finalFilename });
     }
-
-    upload.status = 'complete';
-    io.emit('transcode-complete', { uploadId, filename: upload.filename });
-    res.json({ status: 'complete', uploadId, filename: upload.filename });
-  } catch (err) {
-    upload.status = 'error';
-    upload.errorMessage = err.message;
-    console.error(`[MULTIPART UPLOAD] Completion error:`, err);
-    
-    // Abort the S3 upload if it failed to complete so S3 storage is cleaned up
-    try {
-      await s3Client.send(new AbortMultipartUploadCommand({
-        Bucket: S3_BUCKET,
-        Key: key,
-        UploadId: uploadId
-      }));
-      console.log(`[MULTIPART UPLOAD] Aborted S3 Multipart: ${uploadId}`);
-    } catch (abortErr) {
-      console.error(`[MULTIPART UPLOAD] Abort failed:`, abortErr.message);
-    }
-
-    res.status(500).json({ error: 'Failed to assemble upload', details: err.message });
-  }
+  });
 });
 
-// Legacy server-relay chunked upload removed — uploads go browser → S3 directly
-// via the multipart endpoints above, so no video bytes ever pass through this process.
+// Local HLS transcoding. MP4 inputs get codec-copy (near-instant); everything
+// else re-encodes to H.264/AAC — which also fixes browser-hostile audio like
+// the DTS tracks common in MKVs.
+function transcodeToHls(uploadId, inputPath, filename) {
+  const baseName = path.parse(filename).name;
+  const hlsDir = path.join(HLS_DIR, baseName);
+  fs.mkdirSync(hlsDir, { recursive: true });
+  const hlsOutput = path.join(hlsDir, 'index.m3u8');
+  const ext = path.extname(filename).toLowerCase();
 
-// Server-side MediaConvert job monitor — runs regardless of whether the
-// uploader keeps their tab open, so job failures always land in the logs
-// (previously only browser polling checked the job; close the tab and an
-// ERROR — e.g. unsupported codec inside an MKV — vanished silently).
-function monitorMediaConvertJob(jobId, uploadId, upload) {
-  const { GetJobCommand } = require('@aws-sdk/client-mediaconvert');
-  const startedAt = Date.now();
-  const timer = setInterval(async () => {
-    if (Date.now() - startedAt > 2 * 60 * 60 * 1000) {
-      console.error(`[MEDIACONVERT] Giving up monitoring job ${jobId} after 2h`);
-      clearInterval(timer);
-      return;
-    }
+  const commonArgs = [
+    '-start_number', '0',
+    '-hls_time', '4',
+    '-hls_list_size', '0',
+    '-hls_segment_filename', path.join(hlsDir, 'segment%03d.ts'),
+    '-f', 'hls',
+    hlsOutput,
+  ];
+  const ffmpegArgs = ext === '.mp4'
+    ? ['-i', inputPath, '-codec', 'copy', ...commonArgs]
+    : ['-i', inputPath, '-c:v', 'libx264', '-c:a', 'aac', '-preset', 'veryfast', '-crf', '22', ...commonArgs];
+
+  console.log(`[HLS] Transcoding: ${filename}`);
+  const ffmpeg = spawn(FFMPEG_PATH, ffmpegArgs);
+  let stderrTail = '';
+
+  const progressInterval = setInterval(() => {
     try {
-      const data = await mediaConvertClient.send(new GetJobCommand({ Id: jobId }));
-      const job = data.Job;
-      if (job.Status === 'COMPLETE') {
-        clearInterval(timer);
-        upload.status = 'complete';
-        console.log(`[MEDIACONVERT] Job ${jobId} COMPLETE — HLS ready for: ${upload.filename}`);
-        io.emit('transcode-complete', { uploadId, filename: upload.filename });
-      } else if (job.Status === 'ERROR') {
-        clearInterval(timer);
-        upload.status = 'error';
-        upload.errorMessage = job.ErrorMessage || 'MediaConvert job failed';
-        console.error(`[MEDIACONVERT] Job ${jobId} FAILED for ${upload.filename} | code: ${job.ErrorCode} | ${job.ErrorMessage} — video stays raw`);
-        io.emit('transcode-error', { uploadId, filename: upload.filename });
-      } else if (job.Status === 'PROGRESSING') {
-        upload.jobPercentComplete = job.JobPercentComplete || 0;
-        io.emit('transcode-progress', {
-          uploadId,
-          filename: upload.filename,
-          status: 'transcoding',
-          jobPercentComplete: upload.jobPercentComplete
-        });
-      }
-    } catch (err) {
-      console.error(`[MEDIACONVERT] Poll failed for job ${jobId}:`, err.message);
+      const tsCreated = fs.readdirSync(hlsDir).filter(f => f.endsWith('.ts')).length;
+      uploads[uploadId].tsCreated = tsCreated;
+      io.emit('transcode-progress', { uploadId, filename, status: 'transcoding', tsCreated });
+    } catch {}
+  }, 1000);
+
+  ffmpeg.stderr.on('data', (d) => { stderrTail = (stderrTail + d.toString()).slice(-800); });
+
+  ffmpeg.on('error', (err) => {
+    clearInterval(progressInterval);
+    console.error('[HLS] FFmpeg spawn error:', err.message);
+    uploads[uploadId].status = 'error';
+    uploads[uploadId].errorMessage = err.message;
+    io.emit('transcode-error', { uploadId, filename });
+  });
+
+  ffmpeg.on('close', (code) => {
+    clearInterval(progressInterval);
+    if (code === 0) {
+      uploads[uploadId].status = 'complete';
+      console.log(`[HLS] Complete: ${filename}`);
+      io.emit('transcode-complete', { uploadId, filename });
+    } else {
+      uploads[uploadId].status = 'error';
+      uploads[uploadId].errorMessage = `FFmpeg exited with code ${code}`;
+      console.error(`[HLS] Failed (code ${code}): ${filename}\n${stderrTail}`);
+      io.emit('transcode-error', { uploadId, filename });
+      // Video stays raw-playable; just remove the partial HLS dir
+      try { fs.rmSync(hlsDir, { recursive: true, force: true }); } catch {}
     }
-  }, 15000);
+  });
 }
 
-// Check upload/transcode status (state is kept current by monitorMediaConvertJob)
+// Upload/transcode status (polled by the upload manager)
 app.get('/api/upload/status/:uploadId', (req, res) => {
   const upload = uploads[req.params.uploadId];
   if (!upload) return res.status(404).json({ error: 'Not found' });
-
   res.json({
     status: upload.status,
     filename: upload.filename,
     errorMessage: upload.errorMessage || '',
-    jobPercentComplete: upload.jobPercentComplete || 0,
     tsCreated: upload.tsCreated || 0,
-    tsUploaded: upload.tsUploaded || 0,
-    tsTotal: upload.tsTotal || 0
   });
 });
 
-// Delete a video (secure ownership check)
-app.delete('/api/videos/:filename', requireAuth, async (req, res) => {
-  const filename = decodeURIComponent(req.params.filename);
-  const safeName = filename.replace(/[^a-zA-Z0-9_\-.() ]/g, '');
-
+// Delete a video (owner only): file, HLS dir, thumbnail, DB row
+app.delete('/api/videos/:filename', requireAuth, (req, res) => {
+  const safeName = path.basename(decodeURIComponent(req.params.filename));
   try {
-    const videoRes = await ddbDocClient.send(new GetCommand({
-      TableName: 'watch_party_videos',
-      Key: { filename: safeName }
-    }));
-    const videoRecord = videoRes.Item;
+    const video = store.getVideo(safeName);
+    if (!video) return res.status(404).json({ error: 'Video not found' });
+    if (video.uploaderId !== req.user.id) return res.status(403).json({ error: 'Forbidden: You do not own this video' });
 
-    if (!videoRecord) {
-      return res.status(404).json({ error: 'Video not found in database' });
-    }
-
-    if (videoRecord.uploaderId !== req.user.id) {
-      return res.status(403).json({ error: 'Forbidden: You do not own this video' });
-    }
-
-    // 2. Clean up files
-    if (VIDEO_SOURCE === 's3') {
-      try {
-        const deleteRawCommand = new DeleteObjectCommand({
-          Bucket: S3_BUCKET,
-          Key: `videos/${safeName}`,
-        });
-        await s3Client.send(deleteRawCommand);
-
-        const baseName = path.parse(safeName).name;
-        // List all segments/manifest files inside the HLS folder prefix
-        const listCommand = new ListObjectsV2Command({
-          Bucket: S3_BUCKET,
-          Prefix: `videos/hls/${baseName}/`
-        });
-        const listRes = await s3Client.send(listCommand);
-
-        if (listRes.Contents && listRes.Contents.length > 0) {
-          const deleteObjectsParams = {
-            Bucket: S3_BUCKET,
-            Delete: {
-              Objects: listRes.Contents.map(obj => ({ Key: obj.Key }))
-            }
-          };
-          await s3Client.send(new DeleteObjectsCommand(deleteObjectsParams));
-        }
-        console.log(`[DELETE] Successfully deleted raw file and HLS segments from S3 for: ${safeName}`);
-      } catch (s3Err) {
-        console.error(`[DELETE] Error cleaning up S3 files:`, s3Err.message);
-      }
-    }
-
-    const filePath = path.join(__dirname, 'videos', safeName);
-    const baseName = path.parse(safeName).name;
-    const hlsDir = path.join(__dirname, 'videos', 'hls', baseName);
-
+    const filePath = path.join(VIDEOS_DIR, safeName);
+    const hlsDir = path.join(HLS_DIR, path.parse(safeName).name);
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     if (fs.existsSync(hlsDir)) fs.rmSync(hlsDir, { recursive: true, force: true });
 
-    // Clean up thumbnail if it exists
-    if (videoRecord.thumbnailUrl) {
-      if (videoRecord.thumbnailUrl.startsWith('/api/thumbnail/')) {
-        const thumbFilename = videoRecord.thumbnailUrl.substring('/api/thumbnail/'.length);
-        if (s3Client && S3_BUCKET) {
-          try {
-            await s3Client.send(new DeleteObjectCommand({
-              Bucket: S3_BUCKET,
-              Key: `thumbnails/${thumbFilename}`
-            }));
-            console.log(`[DELETE] Deleted thumbnail from S3: thumbnails/${thumbFilename}`);
-          } catch (err) {
-            console.error(`[DELETE] Failed to delete S3 thumbnail:`, err.message);
-          }
-        }
-      } else if (videoRecord.thumbnailUrl.startsWith('/uploads/thumbnails/')) {
-        const thumbFilename = videoRecord.thumbnailUrl.substring('/uploads/thumbnails/'.length);
-        const thumbPath = path.join(__dirname, 'public', 'uploads', 'thumbnails', thumbFilename);
-        try {
-          if (fs.existsSync(thumbPath)) {
-            fs.unlinkSync(thumbPath);
-            console.log(`[DELETE] Deleted local thumbnail: ${thumbFilename}`);
-          }
-        } catch (err) {
-          console.error(`[DELETE] Failed to delete local thumbnail:`, err.message);
-        }
-      }
+    if (video.thumbnailUrl?.startsWith('/uploads/thumbnails/')) {
+      const thumbPath = path.join(UPLOADS_DIR, 'thumbnails', path.basename(video.thumbnailUrl));
+      try { if (fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath); } catch {}
     }
 
-    // 3. Delete DB record
-    await ddbDocClient.send(new DeleteCommand({
-      TableName: 'watch_party_videos',
-      Key: { filename: safeName }
-    }));
-
+    store.deleteVideo(safeName);
     res.json({ deleted: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Toggle video privacy
-app.put('/api/videos/:videoId/privacy', requireAuth, async (req, res) => {
-  const { videoId } = req.params;
-  const { isPrivate } = req.body;
-
+// Toggle video privacy (owner only)
+app.put('/api/videos/:videoId/privacy', express.json(), requireAuth, (req, res) => {
   try {
-    const scanRes = await ddbDocClient.send(new ScanCommand({
-      TableName: 'watch_party_videos',
-      FilterExpression: 'id = :vid',
-      ExpressionAttributeValues: { ':vid': videoId }
-    }));
-
-    const video = scanRes.Items && scanRes.Items.length > 0 ? scanRes.Items[0] : null;
-    if (!video) {
-      return res.status(404).json({ error: 'Video not found' });
-    }
-
-    if (video.uploaderId !== req.user.id) {
-      return res.status(403).json({ error: 'Unauthorized to change privacy for this video' });
-    }
-
-    video.isPrivate = !!isPrivate;
-    await ddbDocClient.send(new PutCommand({
-      TableName: 'watch_party_videos',
-      Item: video
-    }));
-
-    console.log(`[VIDEOS] Privacy toggled for ${video.filename} to ${isPrivate}`);
-    return res.json({ success: true, isPrivate: video.isPrivate });
+    const video = store.getVideoById(req.params.videoId);
+    if (!video) return res.status(404).json({ error: 'Video not found' });
+    if (video.uploaderId !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
+    store.setVideoPrivacy(req.params.videoId, !!req.body.isPrivate);
+    res.json({ success: true, isPrivate: !!req.body.isPrivate });
   } catch (err) {
-    console.error('[API Toggle Video Privacy Error]', err);
-    return res.status(500).json({ error: 'Failed to update video privacy' });
+    res.status(500).json({ error: 'Failed to update video privacy' });
   }
 });
 
 // ─── Watch Party Rooms ──────────────────────────────────────────────────────
-// rooms = { roomId: { host, users: Map, state, guestControls } }
+const io = new Server(server, {
+  cors: { origin: '*', methods: ['GET', 'POST'] },
+  pingTimeout: 60000,
+  pingInterval: 25000,
+  transports: ['websocket', 'polling'],
+  maxHttpBufferSize: 1e6,
+});
+
 const rooms = {};
 
-// ── Check room availability (for custom room codes) ─────────────────────────
 app.get('/api/check-room/:code', (req, res) => {
   const code = req.params.code?.trim().toUpperCase();
   if (!code) return res.status(400).json({ error: 'Missing code' });
@@ -1650,8 +499,7 @@ app.get('/api/check-room/:code', (req, res) => {
     return res.json({ available: false, reason: 'Invalid format. Use 3-12 alphanumeric characters.' });
   }
   const room = rooms[code];
-  const inUse = room && room.users.size > 0;
-  res.json({ available: !inUse, code });
+  res.json({ available: !(room && room.users.size > 0), code });
 });
 
 function getOrCreateRoom(roomId) {
@@ -1659,13 +507,7 @@ function getOrCreateRoom(roomId) {
     rooms[roomId] = {
       host: null,
       users: new Map(),
-      state: {
-        videoKey: null,
-        playing: false,
-        currentTime: 0,
-        lastUpdated: Date.now(),
-        hostBuffering: false,
-      },
+      state: { videoKey: null, playing: false, currentTime: 0, lastUpdated: Date.now(), hostBuffering: false },
       guestControls: true,
     };
   }
@@ -1682,29 +524,24 @@ function getUserList(room) {
       avatarUrl: info.avatarUrl,
       country: info.country,
       isHost: id === room.host,
-      isVerified: info.isVerified || false
+      isVerified: false,
     });
   }
   return list;
 }
 
-// ─── Socket.IO ──────────────────────────────────────────────────────────────
 io.on('connection', (socket) => {
   console.log(`[WS] Connected: ${socket.id}`);
   let currentRoom = null;
   let currentUsername = null;
 
-  // ── Join room ─────────────────────────────────────────────────────────────
-  socket.on('join-room', async ({ roomId, username, userId, avatarUrl, country }) => {
-    // If re-joining same room (e.g. React StrictMode), clean up old join first
+  socket.on('join-room', ({ roomId, username, userId, avatarUrl, country }) => {
     if (currentRoom && currentRoom !== roomId) {
       socket.leave(currentRoom);
       const oldRoom = rooms[currentRoom];
       if (oldRoom) {
         oldRoom.users.delete(socket.id);
-        if (oldRoom.users.size === 0) {
-          delete rooms[currentRoom];
-        }
+        if (oldRoom.users.size === 0) delete rooms[currentRoom];
       }
     }
 
@@ -1715,22 +552,12 @@ io.on('connection', (socket) => {
     socket.join(roomId);
     const room = getOrCreateRoom(roomId);
 
-    // Fetch verified status from DB if userId is available
-    let dbUserVerified = false;
-    if (userId) {
-      const dbUser = await getUserById(userId);
-      if (dbUser) {
-        dbUserVerified = dbUser.isVerified || false;
-      }
-    }
-
-    room.users.set(socket.id, { 
-      username: currentUsername, 
-      userId, 
-      avatarUrl, 
-      country, 
-      isVerified: dbUserVerified,
-      joinedAt: Date.now() 
+    room.users.set(socket.id, {
+      username: currentUsername,
+      userId,
+      avatarUrl,
+      country,
+      joinedAt: Date.now(),
     });
 
     if (!room.host || !room.users.has(room.host)) {
@@ -1739,10 +566,8 @@ io.on('connection', (socket) => {
       socket.emit('role', { role: 'host' });
       console.log(`[WS] ${currentUsername} is host of room ${roomId}`);
     } else if (room.host === socket.id) {
-      // Reconnecting host
       room.state.hostBuffering = false;
       socket.emit('role', { role: 'host' });
-      console.log(`[WS] ${currentUsername} reconnected as host of room ${roomId}`);
     } else {
       socket.emit('role', { role: 'guest' });
       socket.emit('sync-state', room.state);
@@ -1755,7 +580,6 @@ io.on('connection', (socket) => {
     io.to(roomId).emit('user-count', room.users.size);
     socket.emit('join-success', { roomId, userCount: room.users.size });
 
-    // Notify others
     socket.to(roomId).emit('chat-message', {
       sender: '🤖 System',
       message: `${currentUsername} joined the room`,
@@ -1763,7 +587,6 @@ io.on('connection', (socket) => {
     });
   });
 
-  // ── Host selects video ────────────────────────────────────────────────────
   socket.on('select-video', ({ roomId, videoKey }) => {
     const room = rooms[roomId];
     if (!room || room.host !== socket.id) return;
@@ -1771,54 +594,43 @@ io.on('connection', (socket) => {
     io.to(roomId).emit('video-selected', { videoKey });
   });
 
-  // ── Play ──────────────────────────────────────────────────────────────────
   socket.on('play', ({ roomId, currentTime }) => {
     const room = rooms[roomId];
     if (!room) return;
-    // Check if sender has permission
     if (room.host !== socket.id && !room.guestControls) return;
-
     room.state.playing = true;
     room.state.currentTime = currentTime;
     room.state.lastUpdated = Date.now();
     socket.to(roomId).emit('play', { currentTime });
   });
 
-  // ── Pause ─────────────────────────────────────────────────────────────────
   socket.on('pause', ({ roomId, currentTime }) => {
     const room = rooms[roomId];
     if (!room) return;
     if (room.host !== socket.id && !room.guestControls) return;
-
     room.state.playing = false;
     room.state.currentTime = currentTime;
     room.state.lastUpdated = Date.now();
     socket.to(roomId).emit('pause', { currentTime });
   });
 
-  // ── Seek ──────────────────────────────────────────────────────────────────
   socket.on('seek', ({ roomId, currentTime, playing }) => {
     const room = rooms[roomId];
     if (!room) return;
     if (room.host !== socket.id && !room.guestControls) return;
-
     room.state.currentTime = currentTime;
     room.state.playing = typeof playing === 'boolean' ? playing : room.state.playing;
     room.state.lastUpdated = Date.now();
     socket.to(roomId).emit('seek', { currentTime, playing });
   });
 
-  // ── Toggle guest controls (host only) ─────────────────────────────────────
   socket.on('toggle-guest-controls', ({ roomId, enabled }) => {
     const room = rooms[roomId];
     if (!room || room.host !== socket.id) return;
-
     room.guestControls = !!enabled;
     io.to(roomId).emit('guest-controls-changed', { enabled: room.guestControls });
-    console.log(`[WS] Guest controls ${room.guestControls ? 'enabled' : 'disabled'} in room ${roomId}`);
   });
 
-  // ── Host buffering ────────────────────────────────────────────────────────
   socket.on('host-buffering', ({ roomId, isBuffering }) => {
     const room = rooms[roomId];
     if (!room || room.host !== socket.id) return;
@@ -1826,7 +638,6 @@ io.on('connection', (socket) => {
     socket.to(roomId).emit('host-buffering', { isBuffering });
   });
 
-  // ── Host time update (periodic synchronization) ──────────────────────────
   socket.on('host-time-update', ({ roomId, currentTime, playing, timestamp }) => {
     const room = rooms[roomId];
     if (!room || room.host !== socket.id) return;
@@ -1836,33 +647,24 @@ io.on('connection', (socket) => {
     socket.to(roomId).emit('host-time-update', { currentTime, playing, timestamp });
   });
 
-  // ── Request sync ──────────────────────────────────────────────────────────
   socket.on('request-sync', ({ roomId }) => {
     const room = rooms[roomId];
     if (room) socket.emit('sync-state', room.state);
   });
 
-  // ── Guest request (when guest controls are off) ───────────────────────────
   socket.on('guest-request', ({ roomId, action }) => {
     const room = rooms[roomId];
     if (!room) return;
-    // Only guests can make requests, and only when guest controls are off
     if (room.host === socket.id) return;
     if (room.guestControls) return;
 
     const userInfo = room.users.get(socket.id);
-    const username = userInfo?.username || 'Guest';
-    const requestId = `${socket.id}-${Date.now()}`;
-
-    // Forward request to host
     io.to(room.host).emit('guest-request-received', {
-      id: requestId,
+      id: `${socket.id}-${Date.now()}`,
       guestId: socket.id,
-      username,
+      username: userInfo?.username || 'Guest',
       action,
     });
-
-    console.log(`[WS] Guest ${username} requested: ${action} in room ${roomId}`);
   });
 
   socket.on('host-approve-request', ({ roomId, requestId, action, guestId }) => {
@@ -1870,7 +672,6 @@ io.on('connection', (socket) => {
     if (!room || room.host !== socket.id) return;
 
     const video = room.state;
-    // Execute the action
     switch (action) {
       case 'play':
         room.state.playing = true;
@@ -1883,7 +684,7 @@ io.on('connection', (socket) => {
         io.to(roomId).emit('pause', { currentTime: video.currentTime });
         break;
       case 'seek-forward':
-        room.state.currentTime = Math.min((video.currentTime || 0) + 10, 999999);
+        room.state.currentTime = (video.currentTime || 0) + 10;
         room.state.lastUpdated = Date.now();
         io.to(roomId).emit('seek', { currentTime: room.state.currentTime, playing: room.state.playing });
         break;
@@ -1893,30 +694,23 @@ io.on('connection', (socket) => {
         io.to(roomId).emit('seek', { currentTime: room.state.currentTime, playing: room.state.playing });
         break;
     }
-
-    // Notify the guest
     io.to(guestId).emit('request-approved', { requestId, action });
-    console.log(`[WS] Host approved ${action} request from ${guestId} in room ${roomId}`);
   });
 
   socket.on('host-reject-request', ({ roomId, requestId, guestId }) => {
     const room = rooms[roomId];
     if (!room || room.host !== socket.id) return;
     io.to(guestId).emit('request-rejected', { requestId });
-    console.log(`[WS] Host rejected request ${requestId} from ${guestId} in room ${roomId}`);
   });
 
-  // ── Chat message ──────────────────────────────────────────────────────────
   socket.on('chat-message', ({ roomId, sender, message }) => {
     socket.to(roomId).emit('chat-message', { sender, message });
   });
 
-  // ── Reaction ──────────────────────────────────────────────────────────────
   socket.on('reaction', ({ roomId, emoji }) => {
     socket.to(roomId).emit('reaction', { emoji });
   });
 
-  // ── Disconnect ────────────────────────────────────────────────────────────
   socket.on('disconnect', () => {
     if (!currentRoom) return;
     const room = rooms[currentRoom];
@@ -1924,7 +718,6 @@ io.on('connection', (socket) => {
 
     room.users.delete(socket.id);
 
-    // Notify others
     io.to(currentRoom).emit('chat-message', {
       sender: '🤖 System',
       message: `${currentUsername || 'Someone'} left the room`,
@@ -1932,7 +725,6 @@ io.on('connection', (socket) => {
     });
 
     if (room.host === socket.id) {
-      // Pass host to next user
       const remaining = [...room.users.keys()];
       if (remaining.length > 0) {
         room.host = remaining[0];
@@ -1955,8 +747,7 @@ io.on('connection', (socket) => {
     }
 
     if (rooms[currentRoom]) {
-      const userList = getUserList(room);
-      io.to(currentRoom).emit('user-list', userList);
+      io.to(currentRoom).emit('user-list', getUserList(room));
       io.to(currentRoom).emit('user-count', room.users.size);
     }
 
@@ -1966,12 +757,10 @@ io.on('connection', (socket) => {
 
 // ─── Start ──────────────────────────────────────────────────────────────────
 nextApp.prepare().then(() => {
-  // Let Next.js handle all other routes
   app.all('*', (req, res) => nextHandler(req, res));
 
   server.listen(PORT, () => {
-    console.log(`\n🎬 Watch Party running on http://localhost:${PORT}`);
-    console.log(`   Video source: ${VIDEO_SOURCE}`);
-    console.log(`   Environment: ${dev ? 'development' : 'production'}\n`);
+    console.log(`\n🎬 Watch Party (offline edition) on http://localhost:${PORT}`);
+    console.log(`   Data: ./data/watchparty.db | Videos: ./videos | FFmpeg: ${FFMPEG_PATH ? 'yes' : 'no'}\n`);
   });
 });
