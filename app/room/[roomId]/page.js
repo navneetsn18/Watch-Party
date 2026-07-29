@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback, use, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Trash2, MessageSquare, Tv, Crown, Eye, ShieldAlert, ShieldCheck, Loader2, CirclePlay } from 'lucide-react';
+import { Trash2, MessageSquare, Tv, Crown, Eye, ShieldAlert, ShieldCheck, Loader2, CirclePlay, Check, X, SkipForward, Clock } from 'lucide-react';
 import { getSocket, disconnectSocket } from '../../../lib/socket';
 import { formatSize } from '../../../lib/utils';
 import { ToastProvider, useToast } from '../../../components/Toast';
@@ -64,6 +64,7 @@ function RoomContent({ roomId }) {
   const [userCount, setUserCount] = useState(1);
   const [watchers, setWatchers] = useState([]);
   const [ytUrl, setYtUrl] = useState('');
+  const [queue, setQueue] = useState([]);
   const [guestControls, setGuestControls] = useState(true);
   const [videoUrl, setVideoUrl] = useState(null);
   const [currentVideoKey, setCurrentVideoKey] = useState(null);
@@ -237,10 +238,21 @@ function RoomContent({ roomId }) {
       setGuestControls(enabled);
     });
 
-    socket.on('video-selected', async ({ videoKey }) => {
+    socket.on('video-selected', async ({ videoKey, autoplay }) => {
       await loadVideo(videoKey);
-      addSystemMessage('🎬 Host picked: ' + videoKey.replace(/^videos\//, ''));
+      // autoplay comes from queue auto-advance (video ended, host skipped, a
+      // pending item got approved) — pendingSyncRef is the same mechanism
+      // used for late-join sync-state, applied once the player reports ready.
+      if (autoplay) {
+        pendingSyncRef.current = { currentTime: 0, playing: true, hostBuffering: false };
+      }
+      const label = videoKey.startsWith('youtube:') ? 'a YouTube video' : videoKey.replace(/^videos\//, '');
+      addSystemMessage(autoplay ? '⏭ Now playing: ' + label : '🎬 Host picked: ' + label);
     });
+
+    socket.on('queue-updated', (q) => setQueue(Array.isArray(q) ? q : []));
+    socket.on('queue-error', ({ message }) => showToastRef.current('⚠️ ' + message));
+    socket.on('queue-info', ({ message }) => showToastRef.current('ℹ️ ' + message));
 
     socket.on('play', ({ currentTime }) => {
       if (!isVideoReady()) {
@@ -467,27 +479,39 @@ function RoomContent({ roomId }) {
     }
   }, [roomId]);
 
-  // Accepts watch/short/live/embed/youtu.be URLs or a bare 11-char ID
-  function parseYouTubeId(input) {
-    const s = input.trim();
-    const m = s.match(/(?:youtube\.com\/(?:watch\?.*v=|shorts\/|embed\/|live\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/);
-    if (m) return m[1];
-    if (/^[A-Za-z0-9_-]{11}$/.test(s)) return s;
-    return null;
+  // Server does all URL/playlist parsing and validation (oEmbed lookup, etc.)
+  // — client just forwards the raw text and reacts to queue-error/queue-info.
+  function handleAddToQueue() {
+    const socket = socketRef.current;
+    if (!socket || !ytUrl.trim()) return;
+    socket.emit('queue-add', { roomId, url: ytUrl.trim() });
+    setYtUrl('');
   }
 
-  function handleSelectYouTube() {
-    const id = parseYouTubeId(ytUrl);
-    if (!id) {
-      showToast('⚠️ Could not find a YouTube video ID in that link');
-      return;
-    }
-    const key = `youtube:${id}`;
+  function handleQueueApprove(itemId) {
+    socketRef.current?.emit('queue-approve', { roomId, itemId });
+  }
+
+  function handleQueueReject(itemId) {
+    socketRef.current?.emit('queue-reject', { roomId, itemId });
+  }
+
+  function handleQueueRemove(itemId) {
+    socketRef.current?.emit('queue-remove', { roomId, itemId });
+  }
+
+  function handleQueueSkip() {
+    socketRef.current?.emit('queue-skip', { roomId });
+  }
+
+  const handleVideoEnded = useCallback(() => {
     const socket = socketRef.current;
-    if (!socket) return;
-    socket.emit('select-video', { roomId, videoKey: key });
-    loadVideo(key);
-    setYtUrl('');
+    if (socket && isHostRef.current) socket.emit('video-ended', { roomId });
+  }, [roomId]);
+
+  function isMyQueueItem(item) {
+    return item.addedBySocketId === socketRef.current?.id
+      || (item.addedByUserId && profile?.id && item.addedByUserId === profile.id);
   }
 
   function handleSelectVideo(video) {
@@ -573,6 +597,7 @@ function RoomContent({ roomId }) {
               onSeek={handleSeek}
               onLoadedMetadata={handleLoadedMetadata}
               onHostBuffering={handleHostBuffering}
+              onEnded={handleVideoEnded}
               onRequestAction={!canControl ? handleRequestAction : undefined}
             />
           ) : (
@@ -587,6 +612,7 @@ function RoomContent({ roomId }) {
               onSeek={handleSeek}
               onLoadedMetadata={handleLoadedMetadata}
               onHostBuffering={handleHostBuffering}
+              onEnded={handleVideoEnded}
               fullscreenNotifications={fsNotifications}
               onRequestAction={!canControl ? handleRequestAction : undefined}
               guestRequests={guestRequests}
@@ -618,26 +644,29 @@ function RoomContent({ roomId }) {
                 />
               )}
             </button>
-            {isHost && (
-              <button
-                onClick={() => setActiveTab('videos')}
-                className={`flex-1 py-3 text-xs font-bold transition-all relative ${
-                  activeTab === 'videos' ? 'text-white font-black' : 'text-zinc-500 hover:text-zinc-300'
-                }`}
-              >
-                <span className="flex items-center justify-center gap-1.5">
-                  <Tv className="w-3.5 h-3.5" />
-                  <span>Videos</span>
-                </span>
-                {activeTab === 'videos' && (
-                  <motion.div
-                    layoutId="room-sidebar-tab"
-                    className="absolute bottom-0 left-0 right-0 h-[2px] bg-violet-500"
-                    transition={{ type: 'spring', stiffness: 350, damping: 30 }}
-                  />
+            <button
+              onClick={() => setActiveTab('videos')}
+              className={`flex-1 py-3 text-xs font-bold transition-all relative ${
+                activeTab === 'videos' ? 'text-white font-black' : 'text-zinc-500 hover:text-zinc-300'
+              }`}
+            >
+              <span className="flex items-center justify-center gap-1.5">
+                <Tv className="w-3.5 h-3.5" />
+                <span>Videos</span>
+                {queue.filter(q => q.status === 'pending').length > 0 && isHost && (
+                  <span className="w-4 h-4 rounded-full bg-violet-600 text-white text-[9px] font-extrabold flex items-center justify-center">
+                    {queue.filter(q => q.status === 'pending').length}
+                  </span>
                 )}
-              </button>
-            )}
+              </span>
+              {activeTab === 'videos' && (
+                <motion.div
+                  layoutId="room-sidebar-tab"
+                  className="absolute bottom-0 left-0 right-0 h-[2px] bg-violet-500"
+                  transition={{ type: 'spring', stiffness: 350, damping: 30 }}
+                />
+              )}
+            </button>
           </div>
 
           {/* Chat Panel view */}
@@ -653,94 +682,183 @@ function RoomContent({ roomId }) {
           )}
 
           {/* Videos picker panel */}
-          {activeTab === 'videos' && isHost && (
+          {activeTab === 'videos' && (
             <div className="flex-1 flex flex-col min-h-0 overflow-hidden bg-zinc-950/40">
-              {/* Host instructions banner */}
+              {/* Instructions banner */}
               <div className="p-3 bg-violet-950/20 border-b border-violet-900/35 text-[10px] text-violet-300 font-semibold flex items-center gap-1.5">
                 <Crown className="w-3.5 h-3.5 text-violet-400" />
-                <span>You are Room Host. Pick clips below to synchronize playbacks.</span>
+                <span>
+                  {isHost
+                    ? 'You are Room Host. Add YouTube videos or pick a local clip below.'
+                    : guestControls
+                      ? 'Add YouTube videos below — they play automatically.'
+                      : 'Add YouTube videos below — the host approves each one before it plays.'}
+                </span>
               </div>
 
-              {/* Videos list scrolling grid */}
               <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-2">
-                {/* YouTube box */}
+                {/* YouTube add box — everyone can add */}
                 <span className="text-[10px] uppercase font-black text-zinc-500 tracking-wider mb-1 block">
-                  Watch from YouTube
+                  Add from YouTube
                 </span>
-                <div className={`flex items-center gap-2 p-2 rounded-xl border transition-all ${
-                  currentVideoKey?.startsWith('youtube:')
-                    ? 'bg-red-950/15 border-red-800/40'
-                    : 'bg-zinc-950 border-zinc-900/80'
-                }`}>
+                <div className="flex items-center gap-2 p-2 rounded-xl border bg-zinc-950 border-zinc-900/80 transition-all">
                   <CirclePlay className="w-4 h-4 text-red-500 flex-shrink-0" />
                   <input
                     type="text"
                     value={ytUrl}
                     onChange={(e) => setYtUrl(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === 'Enter') handleSelectYouTube(); }}
-                    placeholder="Paste a YouTube link…"
+                    onKeyDown={(e) => { if (e.key === 'Enter') handleAddToQueue(); }}
+                    placeholder="Paste a video or playlist link…"
                     className="flex-1 min-w-0 bg-transparent text-xs text-zinc-200 placeholder-zinc-600 focus:outline-none"
                   />
                   <button
-                    onClick={handleSelectYouTube}
+                    onClick={handleAddToQueue}
                     className="px-2.5 py-1 rounded-lg bg-red-600 hover:bg-red-500 text-white text-[10px] font-bold cursor-pointer transition-colors flex-shrink-0"
                   >
-                    Play
+                    Add
                   </button>
                 </div>
-                <span className="text-[9px] text-zinc-600 mb-2 leading-snug">
-                  Public videos only — members-only and embed-blocked videos won&apos;t play. Ads may briefly desync viewers; sync self-heals after.
+                <span className="text-[9px] text-zinc-600 mb-1 leading-snug">
+                  Public videos only — members-only and embed-blocked videos won&apos;t play. Playlists add up to 15 recent videos. Ads may briefly desync viewers; sync self-heals after.
                 </span>
 
-                <span className="text-[10px] uppercase font-black text-zinc-500 tracking-wider mb-1 block">
-                  Available Videos ({videos.length})
-                </span>
+                {/* Queue */}
+                <div className="flex items-center justify-between mt-2 mb-1">
+                  <span className="text-[10px] uppercase font-black text-zinc-500 tracking-wider">
+                    Up Next ({queue.filter(q => q.status === 'approved').length})
+                  </span>
+                  {isHost && currentVideoKey?.startsWith('youtube:') && (
+                    <button
+                      onClick={handleQueueSkip}
+                      className="flex items-center gap-1 text-[9px] font-bold text-zinc-400 hover:text-white cursor-pointer transition-colors"
+                      title="Skip to next in queue"
+                    >
+                      <SkipForward className="w-3 h-3" /> Skip
+                    </button>
+                  )}
+                </div>
 
-                {videos.length === 0 ? (
-                  <div className="text-center py-8 border border-zinc-900 rounded-xl bg-zinc-950/20 text-zinc-500 text-xs leading-relaxed">
-                    No videos found. Upload video files via the Navigation menu first!
+                {queue.length === 0 ? (
+                  <div className="text-center py-6 border border-zinc-900 rounded-xl bg-zinc-950/20 text-zinc-500 text-xs leading-relaxed mb-2">
+                    Queue is empty. Paste a YouTube link above to start.
                   </div>
                 ) : (
-                  videos.map((v) => {
-                    const isActive = currentVideoKey === v.key;
-                    return (
+                  <div className="flex flex-col gap-2 mb-2">
+                    {queue.map((item) => (
                       <div
-                        key={v.key}
-                        onClick={() => handleSelectVideo(v)}
-                        className={`flex items-center justify-between p-3 rounded-xl border transition-all cursor-pointer ${
-                          isActive 
-                            ? 'bg-violet-950/15 border-violet-800/40 text-white' 
-                            : 'bg-zinc-950 border-zinc-900/80 text-zinc-300 hover:border-zinc-800 hover:text-white'
+                        key={item.id}
+                        className={`flex items-center gap-2.5 p-2 rounded-xl border ${
+                          item.status === 'pending'
+                            ? 'bg-amber-950/10 border-amber-900/30'
+                            : 'bg-zinc-950 border-zinc-900/80'
                         }`}
                       >
-                        <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                          <span className="text-lg">🎬</span>
-                          <div className="flex flex-col min-w-0 flex-1">
-                            <span className="text-xs font-bold truncate" title={v.name}>
-                              {v.name}
-                            </span>
-                            <span className="text-[9px] text-zinc-500 truncate mt-0.5">
-                              By: {v.uploaderName} {v.country && getFlagEmoji(v.country)}
-                              {v.isPrivate ? ' • 🔒' : ''}
-                            </span>
+                        {item.thumbnail ? (
+                          <img src={item.thumbnail} alt="" className="w-14 h-8 object-cover rounded-md flex-shrink-0" />
+                        ) : (
+                          <div className="w-14 h-8 rounded-md bg-zinc-900 flex items-center justify-center flex-shrink-0">
+                            <CirclePlay className="w-3.5 h-3.5 text-zinc-600" />
                           </div>
+                        )}
+                        <div className="flex flex-col min-w-0 flex-1">
+                          <span className="text-xs font-bold text-zinc-200 truncate" title={item.title}>
+                            {item.title}
+                          </span>
+                          <span className="text-[9px] text-zinc-500 truncate mt-0.5 flex items-center gap-1">
+                            Added by {item.addedByName}
+                            {item.status === 'pending' && (
+                              <span className="text-amber-400 flex items-center gap-0.5">
+                                <Clock className="w-2.5 h-2.5" /> pending
+                              </span>
+                            )}
+                          </span>
                         </div>
-
-                        {v.uploaderId === profile?.id && (
+                        {item.status === 'pending' && isHost && (
+                          <>
+                            <button
+                              onClick={() => handleQueueApprove(item.id)}
+                              title="Approve"
+                              className="p-1.5 rounded-lg bg-emerald-950/20 border border-emerald-900/30 text-emerald-400 hover:bg-emerald-950/40 cursor-pointer transition-colors flex-shrink-0"
+                            >
+                              <Check className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={() => handleQueueReject(item.id)}
+                              title="Reject"
+                              className="p-1.5 rounded-lg bg-red-950/20 border border-red-900/30 text-red-400 hover:bg-red-950/40 cursor-pointer transition-colors flex-shrink-0"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </>
+                        )}
+                        {(isHost || isMyQueueItem(item)) && item.status !== 'pending' && (
                           <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDeleteVideo(v.key);
-                            }}
-                            className="p-1.5 rounded-lg text-zinc-500 hover:text-red-400 hover:bg-red-950/20 transition-all cursor-pointer flex items-center justify-center border border-transparent hover:border-red-900/30"
-                            title="Delete Video"
+                            onClick={() => handleQueueRemove(item.id)}
+                            title="Remove from queue"
+                            className="p-1.5 rounded-lg text-zinc-500 hover:text-red-400 hover:bg-red-950/20 transition-all cursor-pointer flex-shrink-0"
                           >
-                            <Trash2 className="w-3.5 h-3.5" />
+                            <X className="w-3.5 h-3.5" />
                           </button>
                         )}
                       </div>
-                    );
-                  })
+                    ))}
+                  </div>
+                )}
+
+                {/* Local video library — host only, unchanged instant-select */}
+                {isHost && (
+                  <>
+                    <span className="text-[10px] uppercase font-black text-zinc-500 tracking-wider mb-1 block mt-2 pt-3 border-t border-zinc-900/60">
+                      Local Library ({videos.length})
+                    </span>
+
+                    {videos.length === 0 ? (
+                      <div className="text-center py-8 border border-zinc-900 rounded-xl bg-zinc-950/20 text-zinc-500 text-xs leading-relaxed">
+                        No videos found. Upload video files via the Navigation menu first!
+                      </div>
+                    ) : (
+                      videos.map((v) => {
+                        const isActive = currentVideoKey === v.key;
+                        return (
+                          <div
+                            key={v.key}
+                            onClick={() => handleSelectVideo(v)}
+                            className={`flex items-center justify-between p-3 rounded-xl border transition-all cursor-pointer ${
+                              isActive
+                                ? 'bg-violet-950/15 border-violet-800/40 text-white'
+                                : 'bg-zinc-950 border-zinc-900/80 text-zinc-300 hover:border-zinc-800 hover:text-white'
+                            }`}
+                          >
+                            <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                              <span className="text-lg">🎬</span>
+                              <div className="flex flex-col min-w-0 flex-1">
+                                <span className="text-xs font-bold truncate" title={v.name}>
+                                  {v.name}
+                                </span>
+                                <span className="text-[9px] text-zinc-500 truncate mt-0.5">
+                                  By: {v.uploaderName} {v.country && getFlagEmoji(v.country)}
+                                  {v.isPrivate ? ' • 🔒' : ''}
+                                </span>
+                              </div>
+                            </div>
+
+                            {v.uploaderId === profile?.id && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleDeleteVideo(v.key);
+                                }}
+                                className="p-1.5 rounded-lg text-zinc-500 hover:text-red-400 hover:bg-red-950/20 transition-all cursor-pointer flex items-center justify-center border border-transparent hover:border-red-900/30"
+                                title="Delete Video"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })
+                    )}
+                  </>
                 )}
               </div>
             </div>

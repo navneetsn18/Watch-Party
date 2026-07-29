@@ -512,6 +512,7 @@ function getOrCreateRoom(roomId) {
       users: new Map(),
       state: { videoKey: null, playing: false, currentTime: 0, lastUpdated: Date.now(), hostBuffering: false },
       guestControls: true,
+      queue: [],
     };
   }
   return rooms[roomId];
@@ -531,6 +532,75 @@ function getUserList(room) {
     });
   }
   return list;
+}
+
+// ─── YouTube Queue Helpers ───────────────────────────────────────────────────
+function parseYouTubeVideoId(input) {
+  const s = (input || '').trim();
+  const m = s.match(/(?:youtube\.com\/(?:watch\?.*v=|shorts\/|embed\/|live\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/);
+  if (m) return m[1];
+  if (/^[A-Za-z0-9_-]{11}$/.test(s)) return s;
+  return null;
+}
+
+function parseYouTubePlaylistId(input) {
+  const m = (input || '').match(/[?&]list=([A-Za-z0-9_-]+)/);
+  return m ? m[1] : null;
+}
+
+function decodeXmlEntities(str) {
+  return (str || '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+}
+
+// oEmbed is the official, key-free way to resolve a single video's title and
+// thumbnail; it also 404s for private/nonexistent videos, giving free validation.
+async function fetchOEmbedMeta(videoId) {
+  const url = `https://www.youtube.com/oembed?url=${encodeURIComponent(`https://www.youtube.com/watch?v=${videoId}`)}&format=json`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('Video not found, private, or unavailable');
+  const data = await res.json();
+  return { title: data.title || 'YouTube video', thumbnail: data.thumbnail_url || '' };
+}
+
+// Playlist expansion uses YouTube's public syndication feed — no API key
+// required, but it only exposes the 15 most recently added items per playlist.
+async function fetchPlaylistVideos(playlistId) {
+  const res = await fetch(`https://www.youtube.com/feeds/videos.xml?playlist_id=${encodeURIComponent(playlistId)}`);
+  if (!res.ok) throw new Error('Playlist not found or is private');
+  const xml = await res.text();
+  const entries = [...xml.matchAll(/<entry>([\s\S]*?)<\/entry>/g)].map(m => m[1]);
+  return entries
+    .map(e => {
+      const videoId = e.match(/<yt:videoId>(.*?)<\/yt:videoId>/)?.[1];
+      const title = e.match(/<title>([\s\S]*?)<\/title>/)?.[1];
+      const thumbnail = e.match(/<media:thumbnail url="([^"]+)"/)?.[1];
+      return videoId ? { videoId, title: decodeXmlEntities(title || 'YouTube video'), thumbnail: thumbnail || '' } : null;
+    })
+    .filter(Boolean);
+}
+
+// Pull the oldest approved item off the queue and make it the room's active
+// video with autoplay. Used when a video ends, the host skips, or a fresh
+// approval/add unblocks a room that had nothing playing.
+function advanceQueue(room, roomId) {
+  const idx = room.queue.findIndex(q => q.status === 'approved');
+  if (idx === -1) return false;
+  const [next] = room.queue.splice(idx, 1);
+  room.state = {
+    videoKey: `youtube:${next.videoId}`,
+    playing: true,
+    currentTime: 0,
+    lastUpdated: Date.now(),
+    hostBuffering: false,
+  };
+  io.to(roomId).emit('video-selected', { videoKey: room.state.videoKey, autoplay: true });
+  io.to(roomId).emit('queue-updated', room.queue);
+  return true;
 }
 
 io.on('connection', (socket) => {
@@ -582,6 +652,7 @@ io.on('connection', (socket) => {
     io.to(roomId).emit('user-list', userList);
     io.to(roomId).emit('user-count', room.users.size);
     socket.emit('join-success', { roomId, userCount: room.users.size });
+    socket.emit('queue-updated', room.queue);
 
     socket.to(roomId).emit('chat-message', {
       sender: '🤖 System',
@@ -595,6 +666,117 @@ io.on('connection', (socket) => {
     if (!room || room.host !== socket.id) return;
     room.state = { videoKey, playing: false, currentTime: 0, lastUpdated: Date.now(), hostBuffering: false };
     io.to(roomId).emit('video-selected', { videoKey });
+  });
+
+  // ── YouTube queue ─────────────────────────────────────────────────────────
+  // Anyone can add; whether it lands approved or pending depends on
+  // room.guestControls — the same switch that already gates guest playback
+  // control, reused here so there's one "trust the guests" toggle, not two.
+  socket.on('queue-add', async ({ roomId, url }) => {
+    const room = rooms[roomId];
+    if (!room) return;
+    const userInfo = room.users.get(socket.id);
+    const addedByName = userInfo?.username || 'Guest';
+    const addedByUserId = userInfo?.userId || null;
+    const isHostUser = room.host === socket.id;
+    const autoApprove = isHostUser || room.guestControls;
+
+    const playlistId = parseYouTubePlaylistId(url);
+    try {
+      let items;
+      if (playlistId) {
+        const vids = await fetchPlaylistVideos(playlistId);
+        if (vids.length === 0) throw new Error('Playlist is empty, private, or has no recent videos');
+        items = vids;
+      } else {
+        const videoId = parseYouTubeVideoId(url);
+        if (!videoId) {
+          socket.emit('queue-error', { message: 'Could not find a YouTube video in that link' });
+          return;
+        }
+        const meta = await fetchOEmbedMeta(videoId);
+        items = [{ videoId, ...meta }];
+      }
+
+      const now = Date.now();
+      const entries = items.map((it, i) => ({
+        id: crypto.randomUUID(),
+        videoId: it.videoId,
+        title: it.title,
+        thumbnail: it.thumbnail,
+        addedByName,
+        addedByUserId,
+        addedBySocketId: socket.id,
+        status: autoApprove ? 'approved' : 'pending',
+        addedAt: now + i, // preserves playlist order within the queue array
+      }));
+      room.queue.push(...entries);
+      io.to(roomId).emit('queue-updated', room.queue);
+
+      if (playlistId) {
+        socket.emit('queue-info', {
+          message: `Added ${entries.length} video${entries.length !== 1 ? 's' : ''} from the playlist`
+            + (entries.length >= 15 ? " (YouTube's public feed shows up to 15 recent videos)" : '')
+            + (!autoApprove ? ' — waiting for host approval' : '')
+        });
+      } else if (!autoApprove) {
+        socket.emit('queue-info', { message: 'Added to queue — waiting for host approval' });
+      }
+
+      if (!room.state.videoKey) advanceQueue(room, roomId);
+    } catch (err) {
+      console.error('[QUEUE] Add failed:', err.message);
+      socket.emit('queue-error', { message: err.message || 'Failed to add video' });
+    }
+  });
+
+  socket.on('queue-approve', ({ roomId, itemId }) => {
+    const room = rooms[roomId];
+    if (!room || room.host !== socket.id) return;
+    const item = room.queue.find(q => q.id === itemId);
+    if (!item) return;
+    item.status = 'approved';
+    io.to(roomId).emit('queue-updated', room.queue);
+    if (!room.state.videoKey) advanceQueue(room, roomId);
+  });
+
+  socket.on('queue-reject', ({ roomId, itemId }) => {
+    const room = rooms[roomId];
+    if (!room || room.host !== socket.id) return;
+    room.queue = room.queue.filter(q => q.id !== itemId);
+    io.to(roomId).emit('queue-updated', room.queue);
+  });
+
+  socket.on('queue-remove', ({ roomId, itemId }) => {
+    const room = rooms[roomId];
+    if (!room) return;
+    const item = room.queue.find(q => q.id === itemId);
+    if (!item) return;
+    const userInfo = room.users.get(socket.id);
+    const isOwner = item.addedBySocketId === socket.id
+      || (item.addedByUserId && userInfo?.userId && item.addedByUserId === userInfo.userId);
+    if (room.host !== socket.id && !isOwner) return;
+    room.queue = room.queue.filter(q => q.id !== itemId);
+    io.to(roomId).emit('queue-updated', room.queue);
+  });
+
+  socket.on('queue-skip', ({ roomId }) => {
+    const room = rooms[roomId];
+    if (!room || room.host !== socket.id) return;
+    if (!advanceQueue(room, roomId)) {
+      socket.emit('queue-info', { message: 'Queue is empty' });
+    }
+  });
+
+  // Host's player reports natural end-of-video — advance to the next
+  // approved item, or just mark playback stopped if the queue is empty.
+  socket.on('video-ended', ({ roomId }) => {
+    const room = rooms[roomId];
+    if (!room || room.host !== socket.id) return;
+    if (!advanceQueue(room, roomId)) {
+      room.state.playing = false;
+      room.state.lastUpdated = Date.now();
+    }
   });
 
   socket.on('play', ({ roomId, currentTime }) => {

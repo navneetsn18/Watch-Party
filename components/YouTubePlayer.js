@@ -31,6 +31,7 @@ const YouTubePlayer = forwardRef(function YouTubePlayer({
   onSeek,
   onLoadedMetadata,
   onHostBuffering,
+  onEnded,
   onRequestAction,
 }, ref) {
   const containerRef = useRef(null);
@@ -59,12 +60,14 @@ const YouTubePlayer = forwardRef(function YouTubePlayer({
   const onSeekRef = useRef(onSeek);
   const onHostBufferingRef = useRef(onHostBuffering);
   const onRequestActionRef = useRef(onRequestAction);
+  const onEndedRef = useRef(onEnded);
   useEffect(() => { canControlRef.current = canControl; }, [canControl]);
   useEffect(() => { onPlayRef.current = onPlay; }, [onPlay]);
   useEffect(() => { onPauseRef.current = onPause; }, [onPause]);
   useEffect(() => { onSeekRef.current = onSeek; }, [onSeek]);
   useEffect(() => { onHostBufferingRef.current = onHostBuffering; }, [onHostBuffering]);
   useEffect(() => { onRequestActionRef.current = onRequestAction; }, [onRequestAction]);
+  useEffect(() => { onEndedRef.current = onEnded; }, [onEnded]);
 
   function currentTime() {
     try { return playerRef.current?.getCurrentTime?.() || 0; } catch { return 0; }
@@ -124,13 +127,19 @@ const YouTubePlayer = forwardRef(function YouTubePlayer({
                 return;
               }
               if (canControlRef.current) onPlayRef.current?.(currentTime());
-            } else if (e.data === S.PAUSED || e.data === S.ENDED) {
+            } else if (e.data === S.PAUSED) {
               playingRef.current = false;
               if (suppressPauseRef.current > 0) {
                 suppressPauseRef.current -= 1;
                 return;
               }
               if (canControlRef.current) onPauseRef.current?.(currentTime());
+            } else if (e.data === S.ENDED) {
+              playingRef.current = false;
+              // Only the host reports ended (mirrors VideoPlayer) — the
+              // server checks room.host on 'video-ended' too, but no need
+              // for every guest's player to fire it.
+              if (isHost) onEndedRef.current?.();
             } else if (e.data === S.BUFFERING) {
               if (isHost) onHostBufferingRef.current?.(true);
             }
@@ -197,6 +206,14 @@ const YouTubePlayer = forwardRef(function YouTubePlayer({
       if (!p || !readyRef.current || playingRef.current) return;
       suppressPlayRef.current += 1;
       try { p.playVideo(); } catch {}
+      // Programmatic play (e.g. auto-advancing to the next queued video) has
+      // no fresh user gesture behind it and browsers may block it — mirror
+      // VideoPlayer's muted-retry fallback.
+      setTimeout(() => {
+        if (!playingRef.current) {
+          try { p.mute(); p.playVideo(); } catch {}
+        }
+      }, 1200);
     },
     pause: () => {
       const p = playerRef.current;

@@ -19,6 +19,7 @@ const VideoPlayer = forwardRef(function VideoPlayer({
   onSeek,
   onLoadedMetadata,
   onHostBuffering,
+  onEnded,
   fullscreenNotifications = [],
   onRequestAction,
   guestRequests = [],
@@ -71,12 +72,14 @@ const VideoPlayer = forwardRef(function VideoPlayer({
   const onSeekRef = useRef(onSeek);
   const onHostBufferingRef = useRef(onHostBuffering);
   const onRequestActionRef = useRef(onRequestAction);
+  const onEndedRef = useRef(onEnded);
 
   useEffect(() => { canControlRef.current = canControl; }, [canControl]);
   useEffect(() => { onPlayRef.current = onPlay; }, [onPlay]);
   useEffect(() => { onPauseRef.current = onPause; }, [onPause]);
   useEffect(() => { onSeekRef.current = onSeek; }, [onSeek]);
   useEffect(() => { onHostBufferingRef.current = onHostBuffering; }, [onHostBuffering]);
+  useEffect(() => { onEndedRef.current = onEnded; }, [onEnded]);
   useEffect(() => { onRequestActionRef.current = onRequestAction; }, [onRequestAction]);
 
   const playingRef = useRef(playing);
@@ -295,6 +298,12 @@ const VideoPlayer = forwardRef(function VideoPlayer({
         onHostBufferingRef.current(false);
       }
     }
+    // Only the host reports ended — that client drives room.state and the
+    // server checks room.host on 'video-ended' anyway, but no reason to have
+    // every guest fire it too.
+    function handleEnded() {
+      if (isHost) onEndedRef.current?.();
+    }
 
     video.addEventListener('play', handlePlay);
     video.addEventListener('pause', handlePause);
@@ -306,6 +315,7 @@ const VideoPlayer = forwardRef(function VideoPlayer({
     video.addEventListener('playing', handlePlaying);
     video.addEventListener('canplay', handleCanPlay);
     video.addEventListener('error', handleError);
+    video.addEventListener('ended', handleEnded);
 
     return () => {
       video.removeEventListener('play', handlePlay);
@@ -318,6 +328,7 @@ const VideoPlayer = forwardRef(function VideoPlayer({
       video.removeEventListener('playing', handlePlaying);
       video.removeEventListener('canplay', handleCanPlay);
       video.removeEventListener('error', handleError);
+      video.removeEventListener('ended', handleEnded);
     };
   }, [isHost]);
 
