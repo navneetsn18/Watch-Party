@@ -260,11 +260,14 @@ app.get('/api/stream/:filename', (req, res) => {
   }
 });
 
-// HLS manifest + segment serving
+// HLS manifest + segment serving. The name charset must match the upload
+// sanitizer exactly — it once stripped parentheses that uploads allow, which
+// 404'd every "Movie (2024)" style title. Containment check handles traversal.
 app.get('/api/hls/:videoname/:file', (req, res) => {
-  const safeName = decodeURIComponent(req.params.videoname).replace(/[^a-zA-Z0-9_\-. ]/g, '');
-  const safeFile = decodeURIComponent(req.params.file).replace(/[^a-zA-Z0-9_\-.]/g, '');
+  const safeName = path.basename(req.params.videoname).replace(/[^a-zA-Z0-9_\-.() ]/g, '');
+  const safeFile = path.basename(req.params.file).replace(/[^a-zA-Z0-9_\-.]/g, '');
   const filePath = path.join(HLS_DIR, safeName, safeFile);
+  if (!filePath.startsWith(HLS_DIR + path.sep)) return res.status(400).json({ error: 'Bad path' });
   if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'HLS file not found' });
 
   const ext = path.extname(safeFile).toLowerCase();
