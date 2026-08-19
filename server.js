@@ -12,6 +12,14 @@ const jwt = require('jsonwebtoken');
 
 const store = require('./lib/db');
 
+// Timestamped, tagged logging — plain console.log gave no visibility into
+// what was actually happening on a running server (uploads, chat, room
+// activity all invisible). Every log line gets a HH:MM:SS prefix + a tag
+// so `grep '\[CHAT\]'` etc. works on the raw terminal output.
+function ts() { return new Date().toTimeString().slice(0, 8); }
+function log(tag, msg) { console.log(`[${ts()}] [${tag}] ${msg}`); }
+function logErr(tag, msg) { console.error(`[${ts()}] [${tag}] ${msg}`); }
+
 // JWT here is just a session cookie substitute for a trusted local network —
 // there are no passwords to protect.
 const JWT_SECRET = process.env.JWT_SECRET || 'watch-party-local-secret';
@@ -33,9 +41,9 @@ let FFMPEG_PATH = null;
 try {
   const findCmd = process.platform === 'win32' ? 'where ffmpeg' : 'which ffmpeg';
   FFMPEG_PATH = execSync(findCmd, { encoding: 'utf-8' }).split(/\r?\n/)[0].trim();
-  console.log(`[DEBUG] FFmpeg found at: ${FFMPEG_PATH}`);
+  log('BOOT', `FFmpeg found at: ${FFMPEG_PATH}`);
 } catch {
-  console.log('[DEBUG] FFmpeg not found. Videos will stream raw (no HLS).');
+  log('BOOT', 'FFmpeg not found. Videos will stream raw (no HLS).');
 }
 
 const requireAuth = (req, res, nextFn) => {
@@ -99,13 +107,15 @@ app.post('/api/auth/login', express.json(), (req, res) => {
         createdAt: new Date().toISOString(),
       };
       store.createUser(user);
-      console.log(`[AUTH] New user: ${cleanUsername}`);
+      log('AUTH', `New user: ${cleanUsername}`);
+    } else {
+      log('AUTH', `Login: ${cleanUsername}`);
     }
 
     const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: '30d' });
     return res.json({ token, user: clientUser(user) });
   } catch (err) {
-    console.error('[API Login Error]', err);
+    logErr('AUTH', `Login failed: ${err.message}`);
     return res.status(500).json({ error: 'Login failed' });
   }
 });
@@ -137,9 +147,10 @@ app.put('/api/profile', express.json(), requireAuth, (req, res) => {
       country: country !== undefined ? country : current.country,
     };
     store.updateUser(updated);
+    log('PROFILE', `Updated: ${updated.username}`);
     return res.json(clientUser({ ...current, ...updated }));
   } catch (err) {
-    console.error('[API Update Profile Error]', err);
+    logErr('PROFILE', `Update failed: ${err.message}`);
     return res.status(500).json({ error: 'Failed to update profile' });
   }
 });
@@ -154,9 +165,10 @@ app.post('/api/profile/upload-avatar', express.json({ limit: '6mb' }), requireAu
     const ext = path.extname(filename) || '.jpg';
     const uniqueFilename = `${req.user.id}-${Date.now()}${ext}`;
     fs.writeFileSync(path.join(UPLOADS_DIR, 'avatars', uniqueFilename), buffer);
+    log('PROFILE', `Avatar uploaded: ${req.user.username} -> ${uniqueFilename}`);
     res.json({ url: `/uploads/avatars/${uniqueFilename}` });
   } catch (err) {
-    console.error('[Avatar Upload] Error:', err);
+    logErr('PROFILE', `Avatar upload failed: ${err.message}`);
     res.status(500).json({ error: 'Failed to upload avatar' });
   }
 });
@@ -185,7 +197,7 @@ app.get('/api/videos', requireAuth, (req, res) => {
       });
     res.json(videos);
   } catch (err) {
-    console.error('[API] Error listing videos:', err.message);
+    logErr('API', `Error listing videos: ${err.message}`);
     res.status(500).json({ error: 'Failed to list videos' });
   }
 });
@@ -352,11 +364,35 @@ app.post('/api/upload/local', requireAuth, (req, res) => {
   const uploadId = crypto.randomUUID();
   uploads[uploadId] = { filename: finalFilename, status: 'uploading', tsCreated: 0, createdAt: Date.now() };
 
+  const totalBytes = parseInt(req.headers['content-length'] || '0', 10);
+  log('UPLOAD', `Start: ${finalFilename} by ${req.user.username} (${totalBytes > 0 ? (totalBytes / 1e6).toFixed(1) + 'MB' : 'unknown size'})`);
+
   const finalPath = path.join(VIDEOS_DIR, finalFilename);
   const writeStream = fs.createWriteStream(finalPath);
   req.pipe(writeStream);
 
+  // Log progress every 10% (or every 30s for unknown-length requests) —
+  // this was invisible before, so a stuck/slow upload gave zero signal.
+  let receivedBytes = 0;
+  let lastLoggedPct = -1;
+  let lastLoggedAt = Date.now();
+  req.on('data', (chunk) => {
+    receivedBytes += chunk.length;
+    const now = Date.now();
+    if (totalBytes > 0) {
+      const pct = Math.floor((receivedBytes / totalBytes) * 100);
+      if (pct >= lastLoggedPct + 10) {
+        lastLoggedPct = pct;
+        log('UPLOAD', `${finalFilename} — ${pct}% (${(receivedBytes / 1e6).toFixed(1)}MB / ${(totalBytes / 1e6).toFixed(1)}MB)`);
+      }
+    } else if (now - lastLoggedAt > 30000) {
+      lastLoggedAt = now;
+      log('UPLOAD', `${finalFilename} — ${(receivedBytes / 1e6).toFixed(1)}MB received so far`);
+    }
+  });
+
   req.on('aborted', () => {
+    log('UPLOAD', `Aborted: ${finalFilename} at ${(receivedBytes / 1e6).toFixed(1)}MB`);
     writeStream.destroy();
     fs.unlink(finalPath, () => {});
     uploads[uploadId].status = 'error';
@@ -367,7 +403,7 @@ app.post('/api/upload/local', requireAuth, (req, res) => {
   // if no listener is attached) — a dropped connection mid-upload must not
   // take the whole server down with it.
   req.on('error', (err) => {
-    console.error('[UPLOAD] Request stream error:', err.message);
+    logErr('UPLOAD', `Request stream error on ${finalFilename}: ${err.message}`);
     writeStream.destroy();
     fs.unlink(finalPath, () => {});
     if (uploads[uploadId]) {
@@ -377,7 +413,7 @@ app.post('/api/upload/local', requireAuth, (req, res) => {
   });
 
   writeStream.on('error', (err) => {
-    console.error('[UPLOAD] Write error:', err.message);
+    logErr('UPLOAD', `Write error on ${finalFilename}: ${err.message}`);
     uploads[uploadId].status = 'error';
     uploads[uploadId].errorMessage = err.message;
     res.status(500).json({ error: 'Failed to write file' });
@@ -385,7 +421,7 @@ app.post('/api/upload/local', requireAuth, (req, res) => {
 
   writeStream.on('finish', () => {
     if (uploads[uploadId].status === 'error') return;
-    console.log(`[UPLOAD] Saved: ${finalFilename} (${(fs.statSync(finalPath).size / 1e6).toFixed(1)}MB)`);
+    log('UPLOAD', `Saved: ${finalFilename} (${(fs.statSync(finalPath).size / 1e6).toFixed(1)}MB)`);
 
     // Register immediately — video is playable raw right away
     const displayNameFinal = rawDisplayName.toLowerCase().endsWith(ext) ? rawDisplayName : `${rawDisplayName}${ext}`;
@@ -400,6 +436,7 @@ app.post('/api/upload/local', requireAuth, (req, res) => {
       thumbnailUrl: (req.query.thumbnailUrl || '').toString(),
       createdAt: new Date().toISOString(),
     });
+    log('UPLOAD', `Registered: ${displayNameFinal} (id ${videoId}, owner ${req.user.username})`);
 
     if (FFMPEG_PATH) {
       uploads[uploadId].status = 'transcoding';
@@ -435,15 +472,20 @@ function transcodeToHls(uploadId, inputPath, filename) {
     ? ['-i', inputPath, '-codec', 'copy', ...commonArgs]
     : ['-i', inputPath, '-c:v', 'libx264', '-c:a', 'aac', '-preset', 'veryfast', '-crf', '22', ...commonArgs];
 
-  console.log(`[HLS] Transcoding: ${filename}`);
+  log('HLS', `Transcoding start: ${filename} (${ext === '.mp4' ? 'codec-copy' : 'h264/aac re-encode'})`);
   const ffmpeg = spawn(FFMPEG_PATH, ffmpegArgs);
   let stderrTail = '';
+  let lastLoggedCount = -1;
 
   const progressInterval = setInterval(() => {
     try {
       const tsCreated = fs.readdirSync(hlsDir).filter(f => f.endsWith('.ts')).length;
       uploads[uploadId].tsCreated = tsCreated;
       io.emit('transcode-progress', { uploadId, filename, status: 'transcoding', tsCreated });
+      if (tsCreated > 0 && tsCreated !== lastLoggedCount && tsCreated % 25 === 0) {
+        lastLoggedCount = tsCreated;
+        log('HLS', `${filename} — ${tsCreated} segments (${tsCreated * 4}s)`);
+      }
     } catch {}
   }, 1000);
 
@@ -451,7 +493,7 @@ function transcodeToHls(uploadId, inputPath, filename) {
 
   ffmpeg.on('error', (err) => {
     clearInterval(progressInterval);
-    console.error('[HLS] FFmpeg spawn error:', err.message);
+    logErr('HLS', `FFmpeg spawn error on ${filename}: ${err.message}`);
     uploads[uploadId].status = 'error';
     uploads[uploadId].errorMessage = err.message;
     io.emit('transcode-error', { uploadId, filename });
@@ -461,12 +503,12 @@ function transcodeToHls(uploadId, inputPath, filename) {
     clearInterval(progressInterval);
     if (code === 0) {
       uploads[uploadId].status = 'complete';
-      console.log(`[HLS] Complete: ${filename}`);
+      log('HLS', `Complete: ${filename}`);
       io.emit('transcode-complete', { uploadId, filename });
     } else {
       uploads[uploadId].status = 'error';
       uploads[uploadId].errorMessage = `FFmpeg exited with code ${code}`;
-      console.error(`[HLS] Failed (code ${code}): ${filename}\n${stderrTail}`);
+      logErr('HLS', `Failed (code ${code}): ${filename}\n${stderrTail}`);
       io.emit('transcode-error', { uploadId, filename });
       // Video stays raw-playable; just remove the partial HLS dir
       try { fs.rmSync(hlsDir, { recursive: true, force: true }); } catch {}
@@ -510,8 +552,10 @@ app.delete('/api/videos/:filename', requireAuth, (req, res) => {
       store.deleteSubtitle(sub.id);
     }
     store.deleteVideo(safeName);
+    log('VIDEO', `Deleted: ${safeName} by ${req.user.username}`);
     res.json({ deleted: true });
   } catch (err) {
+    logErr('VIDEO', `Delete failed for ${safeName}: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });
@@ -523,8 +567,10 @@ app.put('/api/videos/:videoId/privacy', express.json(), requireAuth, (req, res) 
     if (!video) return res.status(404).json({ error: 'Video not found' });
     if (video.uploaderId !== req.user.id) return res.status(403).json({ error: 'Unauthorized' });
     store.setVideoPrivacy(req.params.videoId, !!req.body.isPrivate);
+    log('VIDEO', `${video.filename} set ${req.body.isPrivate ? 'private' : 'public'} by ${req.user.username}`);
     res.json({ success: true, isPrivate: !!req.body.isPrivate });
   } catch (err) {
+    logErr('VIDEO', `Privacy toggle failed: ${err.message}`);
     res.status(500).json({ error: 'Failed to update video privacy' });
   }
 });
@@ -569,8 +615,10 @@ app.post('/api/videos/:videoId/subtitles', express.json({ limit: '10mb' }), requ
       createdAt: new Date().toISOString(),
     };
     store.insertSubtitle(sub);
+    log('SUBTITLE', `Added "${sub.label}" (${sub.language}) to ${video.filename} by ${req.user.username}`);
     res.json({ id: sub.id, label: sub.label, language: sub.language, url: `/api/subs/${storedFilename}` });
   } catch (err) {
+    logErr('SUBTITLE', `Add failed: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });
@@ -588,8 +636,10 @@ app.delete('/api/videos/:videoId/subtitles/:subId', requireAuth, (req, res) => {
     const subPath = path.join(SUBS_DIR, sub.filename);
     if (fs.existsSync(subPath)) fs.unlinkSync(subPath);
     store.deleteSubtitle(sub.id);
+    log('SUBTITLE', `Removed "${sub.label}" from ${video.filename}`);
     res.json({ deleted: true });
   } catch (err) {
+    logErr('SUBTITLE', `Delete failed: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });
@@ -727,7 +777,7 @@ function advanceQueue(room, roomId) {
 }
 
 io.on('connection', (socket) => {
-  console.log(`[WS] Connected: ${socket.id}`);
+  log('WS', `Connected: ${socket.id}`);
   let currentRoom = null;
   let currentUsername = null;
 
@@ -760,7 +810,7 @@ io.on('connection', (socket) => {
       room.host = socket.id;
       room.state.hostBuffering = false;
       socket.emit('role', { role: 'host' });
-      console.log(`[WS] ${currentUsername} is host of room ${roomId}`);
+      log('ROOM', `${currentUsername} is host of room ${roomId}`);
     } else if (room.host === socket.id) {
       room.state.hostBuffering = false;
       socket.emit('role', { role: 'host' });
@@ -768,7 +818,7 @@ io.on('connection', (socket) => {
       socket.emit('role', { role: 'guest' });
       socket.emit('sync-state', room.state);
       socket.emit('guest-controls-changed', { enabled: room.guestControls });
-      console.log(`[WS] ${currentUsername} joined room ${roomId}`);
+      log('ROOM', `${currentUsername} joined room ${roomId} (${room.users.size} now watching)`);
     }
 
     const userList = getUserList(room);
@@ -789,6 +839,7 @@ io.on('connection', (socket) => {
     if (!room || room.host !== socket.id) return;
     room.state = { videoKey, playing: false, currentTime: 0, lastUpdated: Date.now(), hostBuffering: false, ended: false };
     io.to(roomId).emit('video-selected', { videoKey });
+    log('ROOM', `${currentUsername} selected "${videoKey}" in room ${roomId}`);
   });
 
   // ── YouTube queue ─────────────────────────────────────────────────────────
@@ -835,6 +886,7 @@ io.on('connection', (socket) => {
       }));
       room.queue.push(...entries);
       io.to(roomId).emit('queue-updated', room.queue);
+      log('QUEUE', `${addedByName} added ${entries.length} item(s) to room ${roomId} (${autoApprove ? 'approved' : 'pending'})`);
 
       if (playlistId) {
         socket.emit('queue-info', {
@@ -848,7 +900,7 @@ io.on('connection', (socket) => {
 
       if (isRoomIdle(room)) advanceQueue(room, roomId);
     } catch (err) {
-      console.error('[QUEUE] Add failed:', err.message);
+      logErr('QUEUE', `Add failed in room ${roomId}: ${err.message}`);
       socket.emit('queue-error', { message: err.message || 'Failed to add video' });
     }
   });
@@ -860,6 +912,7 @@ io.on('connection', (socket) => {
     if (!item) return;
     item.status = 'approved';
     io.to(roomId).emit('queue-updated', room.queue);
+    log('QUEUE', `${currentUsername} approved "${item.title}" in room ${roomId}`);
     if (isRoomIdle(room)) advanceQueue(room, roomId);
   });
 
@@ -872,6 +925,7 @@ io.on('connection', (socket) => {
     const idx = room.queue.findIndex(q => q.id === itemId && q.status === 'approved');
     if (idx === -1) return;
     const [item] = room.queue.splice(idx, 1);
+    log('QUEUE', `${currentUsername} played "${item.title}" now in room ${roomId}`);
     playQueueItem(room, roomId, item);
   });
 
@@ -880,6 +934,7 @@ io.on('connection', (socket) => {
     if (!room || room.host !== socket.id) return;
     room.queue = room.queue.filter(q => q.id !== itemId);
     io.to(roomId).emit('queue-updated', room.queue);
+    log('QUEUE', `${currentUsername} rejected an item in room ${roomId}`);
   });
 
   socket.on('queue-remove', ({ roomId, itemId }) => {
@@ -893,11 +948,13 @@ io.on('connection', (socket) => {
     if (room.host !== socket.id && !isOwner) return;
     room.queue = room.queue.filter(q => q.id !== itemId);
     io.to(roomId).emit('queue-updated', room.queue);
+    log('QUEUE', `${currentUsername} removed "${item.title}" from room ${roomId}`);
   });
 
   socket.on('queue-skip', ({ roomId }) => {
     const room = rooms[roomId];
     if (!room || room.host !== socket.id) return;
+    log('QUEUE', `${currentUsername} skipped current video in room ${roomId}`);
     if (!advanceQueue(room, roomId)) {
       socket.emit('queue-info', { message: 'Queue is empty' });
     }
@@ -908,6 +965,7 @@ io.on('connection', (socket) => {
   socket.on('video-ended', ({ roomId }) => {
     const room = rooms[roomId];
     if (!room || room.host !== socket.id) return;
+    log('QUEUE', `Video ended in room ${roomId}`);
     if (!advanceQueue(room, roomId)) {
       room.state.playing = false;
       room.state.ended = true;
@@ -923,6 +981,7 @@ io.on('connection', (socket) => {
     room.state.currentTime = currentTime;
     room.state.lastUpdated = Date.now();
     socket.to(roomId).emit('play', { currentTime });
+    log('PLAYBACK', `${currentUsername} pressed play in room ${roomId} @ ${currentTime.toFixed(1)}s`);
   });
 
   socket.on('pause', ({ roomId, currentTime }) => {
@@ -933,6 +992,7 @@ io.on('connection', (socket) => {
     room.state.currentTime = currentTime;
     room.state.lastUpdated = Date.now();
     socket.to(roomId).emit('pause', { currentTime });
+    log('PLAYBACK', `${currentUsername} pressed pause in room ${roomId} @ ${currentTime.toFixed(1)}s`);
   });
 
   socket.on('seek', ({ roomId, currentTime, playing }) => {
@@ -943,6 +1003,7 @@ io.on('connection', (socket) => {
     room.state.playing = typeof playing === 'boolean' ? playing : room.state.playing;
     room.state.lastUpdated = Date.now();
     socket.to(roomId).emit('seek', { currentTime, playing });
+    log('PLAYBACK', `${currentUsername} seeked to ${currentTime.toFixed(1)}s in room ${roomId}`);
   });
 
   socket.on('toggle-guest-controls', ({ roomId, enabled }) => {
@@ -950,6 +1011,7 @@ io.on('connection', (socket) => {
     if (!room || room.host !== socket.id) return;
     room.guestControls = !!enabled;
     io.to(roomId).emit('guest-controls-changed', { enabled: room.guestControls });
+    log('ROOM', `${currentUsername} turned guest controls ${enabled ? 'ON' : 'OFF'} in room ${roomId}`);
   });
 
   socket.on('host-buffering', ({ roomId, isBuffering }) => {
@@ -986,6 +1048,7 @@ io.on('connection', (socket) => {
       username: userInfo?.username || 'Guest',
       action,
     });
+    log('GUEST', `${userInfo?.username || 'Guest'} requested "${action}" in room ${roomId}`);
   });
 
   socket.on('host-approve-request', ({ roomId, requestId, action, guestId }) => {
@@ -1016,20 +1079,24 @@ io.on('connection', (socket) => {
         break;
     }
     io.to(guestId).emit('request-approved', { requestId, action });
+    log('GUEST', `${currentUsername} approved "${action}" in room ${roomId}`);
   });
 
   socket.on('host-reject-request', ({ roomId, requestId, guestId }) => {
     const room = rooms[roomId];
     if (!room || room.host !== socket.id) return;
     io.to(guestId).emit('request-rejected', { requestId });
+    log('GUEST', `${currentUsername} rejected a request in room ${roomId}`);
   });
 
   socket.on('chat-message', ({ roomId, sender, message }) => {
     socket.to(roomId).emit('chat-message', { sender, message });
+    log('CHAT', `[${roomId}] ${sender}: ${message}`);
   });
 
   socket.on('reaction', ({ roomId, emoji }) => {
     socket.to(roomId).emit('reaction', { emoji });
+    log('REACTION', `[${roomId}] ${currentUsername} sent ${emoji}`);
   });
 
   socket.on('disconnect', () => {
@@ -1062,6 +1129,7 @@ io.on('connection', (socket) => {
           isSystem: true,
         });
       } else {
+        log('ROOM', `Room ${currentRoom} closed (empty)`);
         delete rooms[currentRoom];
         return;
       }
@@ -1072,7 +1140,7 @@ io.on('connection', (socket) => {
       io.to(currentRoom).emit('user-count', room.users.size);
     }
 
-    console.log(`[WS] Disconnected: ${socket.id} (${currentUsername})`);
+    log('ROOM', `${currentUsername || 'Someone'} left room ${currentRoom} (${socket.id})`);
   });
 });
 
