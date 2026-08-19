@@ -7,7 +7,7 @@ const { Server } = require('socket.io');
 const next = require('next');
 const fs = require('fs');
 const crypto = require('crypto');
-const { execSync, spawn } = require('child_process');
+const { execSync, spawn, spawnSync } = require('child_process');
 const jwt = require('jsonwebtoken');
 
 const store = require('./lib/db');
@@ -44,6 +44,16 @@ try {
   log('BOOT', `FFmpeg found at: ${FFMPEG_PATH}`);
 } catch {
   log('BOOT', 'FFmpeg not found. Videos will stream raw (no HLS).');
+}
+
+// Detect ffprobe — same install as ffmpeg gives it for free. Only used to
+// read a video's duration up front so transcode logs can show an ETA.
+let FFPROBE_PATH = null;
+try {
+  const findCmd = process.platform === 'win32' ? 'where ffprobe' : 'which ffprobe';
+  FFPROBE_PATH = execSync(findCmd, { encoding: 'utf-8' }).split(/\r?\n/)[0].trim();
+} catch {
+  // fine without it — transcode logs just skip the ETA/segment-total math
 }
 
 const requireAuth = (req, res, nextFn) => {
@@ -453,16 +463,39 @@ app.post('/api/upload/local', requireAuth, (req, res) => {
 // Local HLS transcoding. MP4 inputs get codec-copy (near-instant); everything
 // else re-encodes to H.264/AAC — which also fixes browser-hostile audio like
 // the DTS tracks common in MKVs.
+function formatHMS(totalSeconds) {
+  const sec = Math.max(0, Math.round(totalSeconds));
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+// Video duration via ffprobe, used only to estimate the segment count and
+// ETA in transcode logs — playback doesn't depend on this being accurate.
+function probeDurationSeconds(filePath) {
+  if (!FFPROBE_PATH) return null;
+  try {
+    const result = spawnSync(FFPROBE_PATH, [
+      '-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', filePath,
+    ], { encoding: 'utf-8' });
+    const secs = parseFloat((result.stdout || '').trim());
+    return Number.isFinite(secs) && secs > 0 ? secs : null;
+  } catch {
+    return null;
+  }
+}
+
 function transcodeToHls(uploadId, inputPath, filename) {
   const baseName = path.parse(filename).name;
   const hlsDir = path.join(HLS_DIR, baseName);
   fs.mkdirSync(hlsDir, { recursive: true });
   const hlsOutput = path.join(hlsDir, 'index.m3u8');
   const ext = path.extname(filename).toLowerCase();
+  const SEGMENT_SECONDS = 4;
 
   const commonArgs = [
     '-start_number', '0',
-    '-hls_time', '4',
+    '-hls_time', String(SEGMENT_SECONDS),
     '-hls_list_size', '0',
     '-hls_segment_filename', path.join(hlsDir, 'segment%03d.ts'),
     '-f', 'hls',
@@ -472,19 +505,35 @@ function transcodeToHls(uploadId, inputPath, filename) {
     ? ['-i', inputPath, '-codec', 'copy', ...commonArgs]
     : ['-i', inputPath, '-c:v', 'libx264', '-c:a', 'aac', '-preset', 'veryfast', '-crf', '22', ...commonArgs];
 
-  log('HLS', `Transcoding start: ${filename} (${ext === '.mp4' ? 'codec-copy' : 'h264/aac re-encode'})`);
+  const durationSeconds = probeDurationSeconds(inputPath);
+  const expectedSegments = durationSeconds ? Math.ceil(durationSeconds / SEGMENT_SECONDS) : null;
+
+  log('HLS', `Transcoding start: ${filename} (${ext === '.mp4' ? 'codec-copy' : 'h264/aac re-encode'})`
+    + (durationSeconds ? ` — duration ${formatHMS(durationSeconds)}, ~${expectedSegments} segments expected` : ''));
+
+  const startedAt = Date.now();
   const ffmpeg = spawn(FFMPEG_PATH, ffmpegArgs);
   let stderrTail = '';
   let lastLoggedCount = -1;
+  const logStep = expectedSegments ? Math.max(1, Math.round(expectedSegments / 10)) : 25;
 
   const progressInterval = setInterval(() => {
     try {
       const tsCreated = fs.readdirSync(hlsDir).filter(f => f.endsWith('.ts')).length;
       uploads[uploadId].tsCreated = tsCreated;
       io.emit('transcode-progress', { uploadId, filename, status: 'transcoding', tsCreated });
-      if (tsCreated > 0 && tsCreated !== lastLoggedCount && tsCreated % 25 === 0) {
+      if (tsCreated > 0 && tsCreated !== lastLoggedCount && tsCreated % logStep === 0) {
         lastLoggedCount = tsCreated;
-        log('HLS', `${filename} — ${tsCreated} segments (${tsCreated * 4}s)`);
+        const elapsedSec = (Date.now() - startedAt) / 1000;
+        if (expectedSegments) {
+          const pct = Math.min(100, Math.round((tsCreated / expectedSegments) * 100));
+          const rate = tsCreated / elapsedSec; // segments/sec
+          const etaSec = rate > 0 ? (expectedSegments - tsCreated) / rate : null;
+          log('HLS', `${filename} — ${tsCreated}/${expectedSegments} segments (${pct}%)`
+            + (etaSec !== null ? ` — ETA ${formatHMS(etaSec)}` : ''));
+        } else {
+          log('HLS', `${filename} — ${tsCreated} segments (${tsCreated * SEGMENT_SECONDS}s) — elapsed ${formatHMS(elapsedSec)}`);
+        }
       }
     } catch {}
   }, 1000);
@@ -501,14 +550,20 @@ function transcodeToHls(uploadId, inputPath, filename) {
 
   ffmpeg.on('close', (code) => {
     clearInterval(progressInterval);
+    const totalElapsed = formatHMS((Date.now() - startedAt) / 1000);
     if (code === 0) {
       uploads[uploadId].status = 'complete';
-      log('HLS', `Complete: ${filename}`);
+      // Fast transcodes (small file, codec-copy) can finish before the first
+      // 1s progress tick ever runs — re-count from disk instead of trusting
+      // the possibly-still-zero cached value.
+      let finalCount = uploads[uploadId].tsCreated || 0;
+      try { finalCount = fs.readdirSync(hlsDir).filter(f => f.endsWith('.ts')).length; } catch {}
+      log('HLS', `Complete: ${filename} — ${finalCount} segments in ${totalElapsed}`);
       io.emit('transcode-complete', { uploadId, filename });
     } else {
       uploads[uploadId].status = 'error';
       uploads[uploadId].errorMessage = `FFmpeg exited with code ${code}`;
-      logErr('HLS', `Failed (code ${code}): ${filename}\n${stderrTail}`);
+      logErr('HLS', `Failed (code ${code}) after ${totalElapsed}: ${filename}\n${stderrTail}`);
       io.emit('transcode-error', { uploadId, filename });
       // Video stays raw-playable; just remove the partial HLS dir
       try { fs.rmSync(hlsDir, { recursive: true, force: true }); } catch {}
