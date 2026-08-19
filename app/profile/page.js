@@ -3,10 +3,11 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
-import { User, Users, Tv, ShieldCheck, Mail, Globe, Calendar, Lock, Unlock, Settings, Trash2, Shield, UploadCloud, UserPlus, UserCheck, UserX, UserMinus, Loader2 } from 'lucide-react';
+import { User, Users, Tv, ShieldCheck, Mail, Globe, Calendar, Lock, Unlock, Settings, Trash2, Shield, UploadCloud, UserPlus, UserCheck, UserX, UserMinus, Loader2, Captions } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { getFlagEmoji } from '../../components/NavBar';
 import { VerifiedBadge } from '../../components/VerifiedBadge';
+import SubtitlesModal from '../../components/SubtitlesModal';
 
 const COUNTRIES = [
   { code: 'IN', name: 'India' },
@@ -41,6 +42,7 @@ export default function ProfilePage() {
 
   // Lists
   const [myVideos, setMyVideos] = useState([]);
+  const [subtitlesVideo, setSubtitlesVideo] = useState(null);
   
   const [loading, setLoading] = useState(true);
   const [saveLoading, setSaveLoading] = useState(false);
@@ -439,6 +441,15 @@ export default function ProfilePage() {
                             <span>{video.is_private ? 'Private' : 'Public'}</span>
                           </button>
 
+                          {/* Subtitles Button */}
+                          <button
+                            onClick={() => setSubtitlesVideo(video)}
+                            className="p-2 rounded-xl bg-zinc-900 hover:bg-violet-950/20 border border-zinc-800 hover:border-violet-900/30 text-zinc-400 hover:text-violet-400 transition-all cursor-pointer"
+                            title="Manage Subtitles"
+                          >
+                            <Captions className="w-3.5 h-3.5" />
+                          </button>
+
                           {/* Delete Button */}
                           <button
                             onClick={() => handleDeleteVideo(video.id, video.filename)}
@@ -457,6 +468,10 @@ export default function ProfilePage() {
           </AnimatePresence>
         </div>
       </div>
+
+      {subtitlesVideo && (
+        <SubtitlesModal video={subtitlesVideo} onClose={() => setSubtitlesVideo(null)} />
+      )}
     </div>
   );
 }

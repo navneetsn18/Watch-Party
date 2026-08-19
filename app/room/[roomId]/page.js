@@ -67,6 +67,7 @@ function RoomContent({ roomId }) {
   const [queue, setQueue] = useState([]);
   const [guestControls, setGuestControls] = useState(true);
   const [videoUrl, setVideoUrl] = useState(null);
+  const [subtitles, setSubtitles] = useState([]);
   const [currentVideoKey, setCurrentVideoKey] = useState(null);
   const [videos, setVideos] = useState([]);
   const [messages, setMessages] = useState([]);
@@ -122,6 +123,7 @@ function RoomContent({ roomId }) {
     // YouTube keys need no URL resolution — the player embeds the ID directly
     if (key.startsWith('youtube:')) {
       setVideoUrl(null);
+      setSubtitles([]);
       return true;
     }
     try {
@@ -135,6 +137,7 @@ function RoomContent({ roomId }) {
       });
       const data = await res.json();
       setVideoUrl(data.url);
+      setSubtitles(data.subtitles || []);
       return true;
     } catch (err) {
       console.error('Error loading video:', err);
@@ -622,6 +625,7 @@ function RoomContent({ roomId }) {
               guestRequests={guestRequests}
               onApproveRequest={handleApproveRequest}
               onRejectRequest={handleRejectRequest}
+              subtitles={subtitles}
             />
           )}
         </div>

@@ -20,8 +20,10 @@ const dev = process.env.NODE_ENV !== 'production';
 
 const VIDEOS_DIR = path.join(__dirname, 'videos');
 const HLS_DIR = path.join(VIDEOS_DIR, 'hls');
+const SUBS_DIR = path.join(VIDEOS_DIR, 'subs');
 const UPLOADS_DIR = path.join(__dirname, 'public', 'uploads');
 fs.mkdirSync(HLS_DIR, { recursive: true });
+fs.mkdirSync(SUBS_DIR, { recursive: true });
 fs.mkdirSync(path.join(UPLOADS_DIR, 'avatars'), { recursive: true });
 fs.mkdirSync(path.join(UPLOADS_DIR, 'thumbnails'), { recursive: true });
 
@@ -70,6 +72,12 @@ const nextHandler = nextApp.getRequestHandler();
 
 const app = express();
 const server = http.createServer(app);
+// Node 18+ defaults to a 5-minute requestTimeout, which kills the socket
+// mid-transfer on any upload of a large file over a slow disk/connection —
+// looks like a random "network error" to the client with no server-side log.
+// Uploads here are single long-lived POSTs, so disable it.
+server.requestTimeout = 0;
+server.headersTimeout = 0;
 
 // ─── Auth: name-only login ───────────────────────────────────────────────────
 // No passwords. Enter a name; if it exists you're that person, otherwise the
@@ -161,6 +169,7 @@ app.get('/api/videos', requireAuth, (req, res) => {
       .map(v => {
         const uploader = store.getUserById(v.uploaderId);
         return {
+          id: v.id,
           key: `videos/${v.filename}`,
           name: v.displayName || v.filename,
           size: 0,
@@ -204,12 +213,28 @@ app.get('/api/video-url', (req, res) => {
     }
   }
 
+  const subtitles = store.getSubtitlesForVideo(video.id).map(s => ({
+    id: s.id,
+    label: s.label,
+    language: s.language,
+    url: `/api/subs/${encodeURIComponent(s.filename)}`,
+  }));
+
   const baseName = path.parse(baseFilename).name;
   const hlsManifest = path.join(HLS_DIR, baseName, 'index.m3u8');
   if (fs.existsSync(hlsManifest)) {
-    return res.json({ url: `/api/hls/${encodeURIComponent(baseName)}/index.m3u8`, source: 'hls' });
+    return res.json({ url: `/api/hls/${encodeURIComponent(baseName)}/index.m3u8`, source: 'hls', subtitles });
   }
-  res.json({ url: `/api/stream/${encodeURIComponent(baseFilename)}`, source: 'local' });
+  res.json({ url: `/api/stream/${encodeURIComponent(baseFilename)}`, source: 'local', subtitles });
+});
+
+// Serve a subtitle file (WebVTT) by its stored filename
+app.get('/api/subs/:filename', (req, res) => {
+  const safeName = path.basename(req.params.filename);
+  const filePath = path.join(SUBS_DIR, safeName);
+  if (!fs.existsSync(filePath)) return res.status(404).end();
+  res.setHeader('Content-Type', 'text/vtt; charset=utf-8');
+  fs.createReadStream(filePath).pipe(res);
 });
 
 // Range streaming (HTTP 206) for raw files
@@ -338,6 +363,19 @@ app.post('/api/upload/local', requireAuth, (req, res) => {
     uploads[uploadId].errorMessage = 'Upload aborted';
   });
 
+  // An unhandled 'error' on a piped stream crashes the process (Node throws
+  // if no listener is attached) — a dropped connection mid-upload must not
+  // take the whole server down with it.
+  req.on('error', (err) => {
+    console.error('[UPLOAD] Request stream error:', err.message);
+    writeStream.destroy();
+    fs.unlink(finalPath, () => {});
+    if (uploads[uploadId]) {
+      uploads[uploadId].status = 'error';
+      uploads[uploadId].errorMessage = err.message;
+    }
+  });
+
   writeStream.on('error', (err) => {
     console.error('[UPLOAD] Write error:', err.message);
     uploads[uploadId].status = 'error';
@@ -351,9 +389,10 @@ app.post('/api/upload/local', requireAuth, (req, res) => {
 
     // Register immediately — video is playable raw right away
     const displayNameFinal = rawDisplayName.toLowerCase().endsWith(ext) ? rawDisplayName : `${rawDisplayName}${ext}`;
+    const videoId = crypto.randomUUID();
     store.insertVideo({
       filename: finalFilename,
-      id: crypto.randomUUID(),
+      id: videoId,
       displayName: displayNameFinal,
       uploaderId: req.user.id,
       uploaderName: req.user.username,
@@ -365,11 +404,11 @@ app.post('/api/upload/local', requireAuth, (req, res) => {
     if (FFMPEG_PATH) {
       uploads[uploadId].status = 'transcoding';
       transcodeToHls(uploadId, finalPath, finalFilename);
-      res.json({ status: 'transcoding', uploadId, filename: finalFilename });
+      res.json({ status: 'transcoding', uploadId, filename: finalFilename, id: videoId });
     } else {
       uploads[uploadId].status = 'complete';
       io.emit('transcode-complete', { uploadId, filename: finalFilename });
-      res.json({ status: 'complete', uploadId, filename: finalFilename });
+      res.json({ status: 'complete', uploadId, filename: finalFilename, id: videoId });
     }
   });
 });
@@ -465,6 +504,11 @@ app.delete('/api/videos/:filename', requireAuth, (req, res) => {
       try { if (fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath); } catch {}
     }
 
+    for (const sub of store.getSubtitlesForVideo(video.id)) {
+      const subPath = path.join(SUBS_DIR, sub.filename);
+      if (fs.existsSync(subPath)) fs.unlinkSync(subPath);
+      store.deleteSubtitle(sub.id);
+    }
     store.deleteVideo(safeName);
     res.json({ deleted: true });
   } catch (err) {
@@ -482,6 +526,71 @@ app.put('/api/videos/:videoId/privacy', express.json(), requireAuth, (req, res) 
     res.json({ success: true, isPrivate: !!req.body.isPrivate });
   } catch (err) {
     res.status(500).json({ error: 'Failed to update video privacy' });
+  }
+});
+
+// List subtitles for a video
+app.get('/api/videos/:videoId/subtitles', (req, res) => {
+  const video = store.getVideoById(req.params.videoId);
+  if (!video) return res.status(404).json({ error: 'Video not found' });
+  const subs = store.getSubtitlesForVideo(video.id).map(s => ({
+    id: s.id, label: s.label, language: s.language, url: `/api/subs/${encodeURIComponent(s.filename)}`,
+  }));
+  res.json(subs);
+});
+
+// Add a subtitle track (owner only). Body: { label, language, filename, content }
+// content is the raw .vtt or .srt text — SRT gets converted to WebVTT on save.
+app.post('/api/videos/:videoId/subtitles', express.json({ limit: '10mb' }), requireAuth, (req, res) => {
+  try {
+    const video = store.getVideoById(req.params.videoId);
+    if (!video) return res.status(404).json({ error: 'Video not found' });
+    if (video.uploaderId !== req.user.id) return res.status(403).json({ error: 'Forbidden: You do not own this video' });
+
+    const { label, language, filename, content } = req.body;
+    if (!content || typeof content !== 'string') return res.status(400).json({ error: 'Missing subtitle content' });
+
+    let vtt = content.trim();
+    const isSrt = /\.srt$/i.test(filename || '') || !vtt.startsWith('WEBVTT');
+    if (isSrt) {
+      vtt = 'WEBVTT\n\n' + vtt.replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
+    }
+
+    const id = crypto.randomUUID();
+    const storedFilename = `${id}.vtt`;
+    fs.writeFileSync(path.join(SUBS_DIR, storedFilename), vtt, 'utf-8');
+
+    const sub = {
+      id,
+      videoId: video.id,
+      language: (language || 'en').slice(0, 10),
+      label: (label || filename || 'Subtitle').slice(0, 100),
+      filename: storedFilename,
+      createdAt: new Date().toISOString(),
+    };
+    store.insertSubtitle(sub);
+    res.json({ id: sub.id, label: sub.label, language: sub.language, url: `/api/subs/${storedFilename}` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete a subtitle track (owner only)
+app.delete('/api/videos/:videoId/subtitles/:subId', requireAuth, (req, res) => {
+  try {
+    const video = store.getVideoById(req.params.videoId);
+    if (!video) return res.status(404).json({ error: 'Video not found' });
+    if (video.uploaderId !== req.user.id) return res.status(403).json({ error: 'Forbidden: You do not own this video' });
+
+    const sub = store.getSubtitleById(req.params.subId);
+    if (!sub || sub.videoId !== video.id) return res.status(404).json({ error: 'Subtitle not found' });
+
+    const subPath = path.join(SUBS_DIR, sub.filename);
+    if (fs.existsSync(subPath)) fs.unlinkSync(subPath);
+    store.deleteSubtitle(sub.id);
+    res.json({ deleted: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

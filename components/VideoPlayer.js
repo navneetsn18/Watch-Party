@@ -1,7 +1,7 @@
 'use client';
 
 import { useRef, useState, useEffect, useCallback, forwardRef, useImperativeHandle } from 'react';
-import { Play, Pause, RotateCcw, RotateCw, Volume2, VolumeX, Maximize2, Sparkles, Loader2, HelpCircle, ShieldAlert } from 'lucide-react';
+import { Play, Pause, RotateCcw, RotateCw, Volume2, VolumeX, Maximize2, Sparkles, Loader2, HelpCircle, ShieldAlert, Captions } from 'lucide-react';
 import { formatTime } from '../lib/utils';
 import EmojiReactions, { useEmojiSpawner } from './EmojiReactions';
 import GuestRequestModal from './GuestRequestModal';
@@ -25,6 +25,7 @@ const VideoPlayer = forwardRef(function VideoPlayer({
   guestRequests = [],
   onApproveRequest,
   onRejectRequest,
+  subtitles = [],
 }, ref) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -56,6 +57,8 @@ const VideoPlayer = forwardRef(function VideoPlayer({
   const [requestSentFlash, setRequestSentFlash] = useState(null);
   const [playbackRate, setPlaybackRate] = useState(1);
   const [speedMenuOpen, setSpeedMenuOpen] = useState(false);
+  const [activeSubtitleId, setActiveSubtitleId] = useState(null);
+  const [subtitleMenuOpen, setSubtitleMenuOpen] = useState(false);
 
   // Preview thumbnail state
   const [previewVisible, setPreviewVisible] = useState(false);
@@ -395,6 +398,7 @@ const VideoPlayer = forwardRef(function VideoPlayer({
     setCurrentTime(0);
     setBuffered(0);
     setPlaying(false);
+    setActiveSubtitleId(null);
 
     return () => {
       if (hlsRef.current) {
@@ -403,6 +407,17 @@ const VideoPlayer = forwardRef(function VideoPlayer({
       }
     };
   }, [videoUrl]);
+
+  // Sync the browser's native TextTrack rendering with the selected subtitle.
+  // <track> order matches the `subtitles` array order.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const tracks = video.textTracks;
+    for (let i = 0; i < tracks.length; i++) {
+      tracks[i].mode = subtitles[i]?.id === activeSubtitleId ? 'showing' : 'disabled';
+    }
+  }, [activeSubtitleId, subtitles]);
 
   // Load preview video for thumbnails
   useEffect(() => {
@@ -712,7 +727,11 @@ const VideoPlayer = forwardRef(function VideoPlayer({
         preload="metadata"
         onClick={togglePlay}
         onDoubleClick={toggleFullscreen}
-      />
+      >
+        {subtitles.map(s => (
+          <track key={s.id} kind="subtitles" src={s.url} srcLang={s.language} label={s.label} />
+        ))}
+      </video>
 
       {/* Floating Emoji Canvas */}
       <EmojiReactions canvasRef={canvasRef} />
@@ -930,6 +949,44 @@ const VideoPlayer = forwardRef(function VideoPlayer({
           </div>
 
           <div className="flex items-center gap-3">
+            {/* Subtitles */}
+            {subtitles.length > 0 && (
+              <div className="relative">
+                <button
+                  onClick={() => setSubtitleMenuOpen(!subtitleMenuOpen)}
+                  className={`p-1.5 rounded-lg transition-all cursor-pointer ${
+                    activeSubtitleId ? 'text-violet-400' : 'text-zinc-300 hover:text-white hover:bg-white/10'
+                  }`}
+                  title="Subtitles"
+                >
+                  <Captions className="w-[18px] h-[18px]" />
+                </button>
+                {subtitleMenuOpen && (
+                  <div className="absolute bottom-full right-0 mb-2 w-40 py-1 bg-zinc-950 border border-zinc-900 rounded-xl shadow-2xl flex flex-col gap-0.5 z-[60]">
+                    <button
+                      onClick={() => { setActiveSubtitleId(null); setSubtitleMenuOpen(false); }}
+                      className={`w-full px-3 py-1.5 text-left text-xs transition-colors cursor-pointer ${
+                        !activeSubtitleId ? 'bg-violet-600 text-white font-bold' : 'text-zinc-400 hover:bg-zinc-900 hover:text-white'
+                      }`}
+                    >
+                      Off
+                    </button>
+                    {subtitles.map(s => (
+                      <button
+                        key={s.id}
+                        onClick={() => { setActiveSubtitleId(s.id); setSubtitleMenuOpen(false); }}
+                        className={`w-full px-3 py-1.5 text-left text-xs truncate transition-colors cursor-pointer ${
+                          activeSubtitleId === s.id ? 'bg-violet-600 text-white font-bold' : 'text-zinc-400 hover:bg-zinc-900 hover:text-white'
+                        }`}
+                      >
+                        {s.label}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Speed Adjuster */}
             <div className="relative">
               <button

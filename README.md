@@ -16,6 +16,7 @@ Watch videos in perfect sync with people, argue about the movie in chat, and thr
 * **Background uploads** — start an upload, wander off to watch something else in the same tab, upload several files at once. Status list shows progress/speed/ETA per file.
 * **Feed** — grid of uploads with thumbnails; one click starts a watch party. Mark a video Private to keep it off everyone else's feed.
 * **Chat & reactions** — room chat plus emoji that float up the screen like balloons (they used to shoot; we fixed their attitude).
+* **Subtitles** — upload `.vtt` or `.srt` files for any of your videos, any time (Profile → My Videos → CC icon), no re-transcode needed. SRT gets auto-converted to WebVTT. Everyone watching sees the same track list and picks their own language from the CC button in the player.
 * **Watch YouTube together, with a queue** — anyone in the room can paste a YouTube link (or a playlist link — up to 15 videos, YouTube's public feed limit) into the Videos tab. If guest controls are on, it plays immediately (or joins the queue if something's already playing); if guest controls are off, guest additions sit as "pending" until the host approves or rejects them. When a video finishes, the next approved item in the queue starts automatically — no one has to babysit the player. Caveats: public/unlisted videos only (members-only and age-restricted videos block embedding — that's YouTube, not us), and ads may briefly desync viewers until the drift correction reels everyone back in. This is the one feature that needs internet, for reasons that should be obvious.
 
 **Removed on purpose** (this is the couch edition): passwords, email, friend requests, user search, verified badges, and every AWS invoice.
@@ -80,6 +81,7 @@ No `.env.local` needed. No AWS account. No cloud console tabs. The server prints
 data/watchparty.db      users + video metadata (delete = fresh start)
 videos/                 raw uploaded files
 videos/hls/<name>/      transcoded segments (index.m3u8 + segment000.ts ...)
+videos/subs/            subtitle .vtt files
 public/uploads/         avatars + thumbnails
 ```
 
