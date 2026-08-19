@@ -371,7 +371,17 @@ const VideoPlayer = forwardRef(function VideoPlayer({
       let mediaRecoveries = 0;
       hls.on(Hls.Events.ERROR, (event, data) => {
         if (data.fatal) {
-          console.error('[HLS] Fatal error:', data.type, data.details);
+          // data.type/details alone don't say WHY — the native error message,
+          // mimeType, and which fragment it choked on are what actually
+          // narrow down bufferAppendError (malformed segment vs. browser
+          // SourceBuffer quota vs. something else entirely).
+          console.error('[HLS] Fatal error:', data.type, data.details, {
+            reason: data.reason,
+            nativeError: data.err?.message,
+            mimeType: data.mimeType,
+            buffer: data.buffer,
+            frag: data.frag ? { sn: data.frag.sn, level: data.frag.level, url: data.frag.url } : undefined,
+          });
           if (data.type === Hls.ErrorTypes.NETWORK_ERROR && networkRecoveries < 5) {
             networkRecoveries++;
             setTimeout(() => {
