@@ -607,6 +607,30 @@ app.get('/api/upload/status/:uploadId', (req, res) => {
   });
 });
 
+// Regenerate a video's HLS files from the raw file already on disk — for
+// videos whose HLS was built by an older, buggier version of
+// transcodeToHls (e.g. the bufferAppendError codec-copy bug). Doesn't
+// touch the raw file, so no re-upload needed for a fix like that one.
+app.post('/api/videos/:videoId/retranscode', requireAuth, (req, res) => {
+  if (!FFMPEG_PATH) return res.status(400).json({ error: 'FFmpeg is not installed on this server' });
+
+  const video = store.getVideoById(req.params.videoId);
+  if (!video) return res.status(404).json({ error: 'Video not found' });
+  if (video.uploaderId !== req.user.id) return res.status(403).json({ error: 'Forbidden: You do not own this video' });
+
+  const finalPath = path.join(VIDEOS_DIR, video.filename);
+  if (!fs.existsSync(finalPath)) return res.status(404).json({ error: 'Raw video file is missing on disk' });
+
+  const hlsDir = path.join(HLS_DIR, path.parse(video.filename).name);
+  try { fs.rmSync(hlsDir, { recursive: true, force: true }); } catch {}
+
+  const uploadId = crypto.randomUUID();
+  uploads[uploadId] = { filename: video.filename, status: 'transcoding', tsCreated: 0, createdAt: Date.now() };
+  log('HLS', `Re-transcode requested: ${video.filename} by ${req.user.username}`);
+  transcodeToHls(uploadId, finalPath, video.filename);
+  res.json({ status: 'transcoding', uploadId });
+});
+
 // Delete a video (owner only): file, HLS dir, thumbnail, DB row
 app.delete('/api/videos/:filename', requireAuth, (req, res) => {
   const safeName = path.basename(decodeURIComponent(req.params.filename));

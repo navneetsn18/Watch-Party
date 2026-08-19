@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
-import { User, Users, Tv, ShieldCheck, Mail, Globe, Calendar, Lock, Unlock, Settings, Trash2, Shield, UploadCloud, UserPlus, UserCheck, UserX, UserMinus, Loader2, Captions } from 'lucide-react';
+import { User, Users, Tv, ShieldCheck, Mail, Globe, Calendar, Lock, Unlock, Settings, Trash2, Shield, UploadCloud, UserPlus, UserCheck, UserX, UserMinus, Loader2, Captions, RefreshCw } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { getFlagEmoji } from '../../components/NavBar';
 import { VerifiedBadge } from '../../components/VerifiedBadge';
@@ -159,6 +159,39 @@ export default function ProfilePage() {
       setMyVideos(prev => prev.map(v => v.id === videoId ? { ...v, is_private: newStatus } : v));
     } catch (err) {
       alert('Error updating video status: ' + err.message);
+    }
+  }
+
+  const [retranscoding, setRetranscoding] = useState({}); // videoId -> 'transcoding' | 'complete' | 'error'
+
+  async function handleRetranscode(videoId) {
+    setRetranscoding(prev => ({ ...prev, [videoId]: 'transcoding' }));
+    try {
+      const session = await supabase.auth.getSession();
+      const token = session.data.session?.access_token;
+      const res = await fetch(`/api/videos/${videoId}/retranscode`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to start re-transcode');
+
+      const poll = setInterval(async () => {
+        const statusRes = await fetch(`/api/upload/status/${data.uploadId}`);
+        const statusData = await statusRes.json();
+        if (statusData.status === 'complete' || statusData.status === 'error') {
+          clearInterval(poll);
+          setRetranscoding(prev => ({ ...prev, [videoId]: statusData.status }));
+          setTimeout(() => setRetranscoding(prev => {
+            const next = { ...prev };
+            delete next[videoId];
+            return next;
+          }), 4000);
+        }
+      }, 2000);
+    } catch (err) {
+      setRetranscoding(prev => ({ ...prev, [videoId]: 'error' }));
+      alert('Error starting re-transcode: ' + err.message);
     }
   }
 
@@ -448,6 +481,28 @@ export default function ProfilePage() {
                             title="Manage Subtitles"
                           >
                             <Captions className="w-3.5 h-3.5" />
+                          </button>
+
+                          {/* Re-transcode Button — fixes videos whose HLS was built by an
+                              older/buggy transcode without re-uploading the raw file */}
+                          <button
+                            onClick={() => handleRetranscode(video.id)}
+                            disabled={retranscoding[video.id] === 'transcoding'}
+                            className={`p-2 rounded-xl border transition-all cursor-pointer disabled:cursor-wait ${
+                              retranscoding[video.id] === 'complete'
+                                ? 'bg-emerald-950/25 border-emerald-900/30 text-emerald-400'
+                                : retranscoding[video.id] === 'error'
+                                  ? 'bg-red-950/25 border-red-900/30 text-red-400'
+                                  : 'bg-zinc-900 hover:bg-violet-950/20 border-zinc-800 hover:border-violet-900/30 text-zinc-400 hover:text-violet-400'
+                            }`}
+                            title={
+                              retranscoding[video.id] === 'transcoding' ? 'Re-transcoding...'
+                              : retranscoding[video.id] === 'complete' ? 'Done'
+                              : retranscoding[video.id] === 'error' ? 'Failed — check server logs'
+                              : 'Rebuild HLS from the original file (fixes playback errors without re-uploading)'
+                            }
+                          >
+                            <RefreshCw className={`w-3.5 h-3.5 ${retranscoding[video.id] === 'transcoding' ? 'animate-spin' : ''}`} />
                           </button>
 
                           {/* Delete Button */}
