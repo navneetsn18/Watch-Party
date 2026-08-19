@@ -379,6 +379,11 @@ const VideoPlayer = forwardRef(function VideoPlayer({
             }, 1000 * networkRecoveries);
           } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaRecoveries < 3) {
             mediaRecoveries++;
+            // A repeat media error (bufferAppendError especially) right after
+            // the first recovery is usually an audio/video codec parameter
+            // mismatch between segments — swap the audio codec before
+            // retrying, per hls.js's own recommended recovery sequence.
+            if (mediaRecoveries > 1) hls.swapAudioCodec();
             hls.recoverMediaError();
           } else {
             console.error('[HLS] Giving up after repeated fatal errors:', data.details);
