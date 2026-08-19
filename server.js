@@ -29,7 +29,8 @@ fs.mkdirSync(path.join(UPLOADS_DIR, 'thumbnails'), { recursive: true });
 // via range streaming, just without segmented seeking.
 let FFMPEG_PATH = null;
 try {
-  FFMPEG_PATH = execSync('which ffmpeg', { encoding: 'utf-8' }).trim();
+  const findCmd = process.platform === 'win32' ? 'where ffmpeg' : 'which ffmpeg';
+  FFMPEG_PATH = execSync(findCmd, { encoding: 'utf-8' }).split(/\r?\n/)[0].trim();
   console.log(`[DEBUG] FFmpeg found at: ${FFMPEG_PATH}`);
 } catch {
   console.log('[DEBUG] FFmpeg not found. Videos will stream raw (no HLS).');
