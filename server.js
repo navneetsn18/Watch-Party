@@ -485,34 +485,28 @@ function probeDurationSeconds(filePath) {
   }
 }
 
-// MP4 stores H.264 as length-prefixed NAL units (AVCC); MPEG-TS (what HLS
-// segments are) needs Annex-B start codes. ffmpeg doesn't always insert the
-// conversion automatically on a plain `-codec copy` mux, and the segments it
-// produces without it intermittently fail hls.js's SourceBuffer.appendBuffer
-// (surfaces client-side as a fatal "bufferAppendError" that kills playback
-// with no server-side signal at all). Only safe for actual H.264 content —
-// applying it to anything else makes ffmpeg fail outright, so probe first.
-function probeVideoCodec(filePath) {
-  if (!FFPROBE_PATH) return null;
-  try {
-    const result = spawnSync(FFPROBE_PATH, [
-      '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=codec_name', '-of', 'csv=p=0', filePath,
-    ], { encoding: 'utf-8' });
-    return (result.stdout || '').trim() || null;
-  } catch {
-    return null;
-  }
-}
-
 function transcodeToHls(uploadId, inputPath, filename) {
   const baseName = path.parse(filename).name;
   const hlsDir = path.join(HLS_DIR, baseName);
   fs.mkdirSync(hlsDir, { recursive: true });
   const hlsOutput = path.join(hlsDir, 'index.m3u8');
-  const ext = path.extname(filename).toLowerCase();
   const SEGMENT_SECONDS = 4;
 
-  const commonArgs = [
+  // Always re-encode, never codec-copy. Stream-copy can only cut a segment
+  // at an existing keyframe, so with sparse/irregular keyframe intervals
+  // (common in web-released rips) `-hls_time` is just a suggestion —
+  // segments end up anywhere from under a second to 10+ seconds long. Some
+  // of those malformed/too-short segments fail hls.js's transmux/append
+  // outright (fatal "bufferAppendError", first fragment, every time — not a
+  // transient error, doesn't recover on retry). Forcing a real keyframe on
+  // every exact SEGMENT_SECONDS boundary guarantees uniform, clean segments
+  // regardless of source encoding. Costs transcode time instead of being
+  // near-instant, but the raw file is already watchable in the meantime.
+  const ffmpegArgs = [
+    '-i', inputPath,
+    '-c:v', 'libx264', '-c:a', 'aac', '-preset', 'veryfast', '-crf', '22',
+    '-sc_threshold', '0',
+    '-force_key_frames', `expr:gte(t,n_forced*${SEGMENT_SECONDS})`,
     '-start_number', '0',
     '-hls_time', String(SEGMENT_SECONDS),
     '-hls_list_size', '0',
@@ -520,19 +514,11 @@ function transcodeToHls(uploadId, inputPath, filename) {
     '-f', 'hls',
     hlsOutput,
   ];
-  // Codec-copy only for MP4s that are actually H.264 — anything else
-  // (HEVC/AV1/VP9-in-MP4, or unknown when ffprobe is unavailable) gets the
-  // safe re-encode path instead of a copy mux that's likely to misbehave.
-  const videoCodec = ext === '.mp4' ? probeVideoCodec(inputPath) : null;
-  const canCodecCopy = ext === '.mp4' && videoCodec === 'h264';
-  const ffmpegArgs = canCodecCopy
-    ? ['-i', inputPath, '-codec', 'copy', '-bsf:v', 'h264_mp4toannexb', ...commonArgs]
-    : ['-i', inputPath, '-c:v', 'libx264', '-c:a', 'aac', '-preset', 'veryfast', '-crf', '22', ...commonArgs];
 
   const durationSeconds = probeDurationSeconds(inputPath);
   const expectedSegments = durationSeconds ? Math.ceil(durationSeconds / SEGMENT_SECONDS) : null;
 
-  log('HLS', `Transcoding start: ${filename} (${canCodecCopy ? 'codec-copy' : 'h264/aac re-encode'}${videoCodec ? `, source codec ${videoCodec}` : ''})`
+  log('HLS', `Transcoding start: ${filename} (h264/aac re-encode, forced keyframes)`
     + (durationSeconds ? ` — duration ${formatHMS(durationSeconds)}, ~${expectedSegments} segments expected` : ''));
 
   const startedAt = Date.now();

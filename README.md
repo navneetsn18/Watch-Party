@@ -12,7 +12,7 @@ Watch videos in perfect sync with people, argue about the movie in chat, and thr
 * **Name-only login** — type a name, you're in. Same name next time = same profile. There are no passwords because there is nothing to steal; the "database" is a file on your machine.
 * **Host & guest controls** — first into the room wears the crown 👑. Host can lock controls; locked-out guests send polite play/pause/skip requests the host approves or rejects.
 * **Who's watching** — the viewer-count badge in the room shows a hover list of everyone watching, with avatars, flags, and a crown on the host.
-* **Local HLS transcoding** — uploads are chopped into 4-second `.ts` segments by ffmpeg *on your machine* for smooth seeking. MP4s get codec-copy (near-instant); MKV/AVI/everything-else re-encode to H.264/AAC, which also fixes the classic "MKV plays but has no audio" browser problem.
+* **Local HLS transcoding** — uploads are re-encoded to H.264/AAC and chopped into 4-second `.ts` segments by ffmpeg *on your machine*, with a keyframe forced on every segment boundary so seeking is smooth and every segment is clean regardless of the source's own keyframe spacing. Also fixes the classic "MKV plays but has no audio" browser problem. Takes real CPU time (not instant) — the raw upload is watchable immediately in the meantime and silently upgrades once HLS is ready.
 * **Background uploads** — start an upload, wander off to watch something else in the same tab, upload several files at once. Status list shows progress/speed/ETA per file.
 * **Feed** — grid of uploads with thumbnails; one click starts a watch party. Mark a video Private to keep it off everyone else's feed.
 * **Chat & reactions** — room chat plus emoji that float up the screen like balloons (they used to shoot; we fixed their attitude).
@@ -114,7 +114,7 @@ Same-network viewers (same WiFi) don't need a tunnel: give them `http://<your-lo
 It's a raw MKV/AVI with DTS or AC3 audio, and HLS hasn't finished (or ffmpeg is missing). Wait for the transcode — the HLS version converts audio to AAC. If ffmpeg isn't installed, install it and re-upload.
 
 **"Transcoding takes forever"**
-MP4 inputs are codec-copied — near-instant. Non-MP4 inputs re-encode, which takes real CPU time (roughly 0.5-2x the movie's duration depending on your machine). It runs in the background; the video is watchable raw meanwhile.
+All inputs re-encode (roughly 0.5-2x the movie's duration depending on your machine) so every HLS segment gets a clean forced keyframe, regardless of the source's own keyframe spacing. It runs in the background; the video is watchable raw meanwhile.
 
 **"I want to start over"**
 ```bash
