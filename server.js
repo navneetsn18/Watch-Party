@@ -560,6 +560,15 @@ const SEGMENT_SECONDS = 4;
 function buildFfmpegArgs(inputPath, hlsDir, hlsOutput, encoder) {
   return [
     '-i', inputPath,
+    // Without an explicit map, ffmpeg auto-includes the source's own
+    // embedded subtitle track (if any) and the HLS muxer segments it
+    // separately as index0.vtt, index1.vtt... — clutter we never asked for
+    // and never use (subtitles are handled by our own upload system). Worse,
+    // a bitmap subtitle format (PGS/dvd_subtitle — common in WEB-DL/BluRay
+    // rips) can't be auto-converted to WebVTT at all and can break the
+    // entire transcode. Pin to exactly one video + one audio stream so the
+    // source's subtitle/extra-audio tracks never reach the muxer.
+    '-map', '0:v:0', '-map', '0:a:0', '-sn',
     ...videoEncodeArgs(encoder),
     // Without this, a 10-bit source (common in "IMAX"/HDR-sourced WEB rips)
     // gets re-encoded as High-10-profile H.264 — no browser's MSE decoder
