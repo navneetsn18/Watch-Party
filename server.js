@@ -529,6 +529,13 @@ function buildFfmpegArgs(inputPath, hlsDir, hlsOutput, encoder) {
   return [
     '-i', inputPath,
     ...videoEncodeArgs(encoder),
+    // Without this, a 10-bit source (common in "IMAX"/HDR-sourced WEB rips)
+    // gets re-encoded as High-10-profile H.264 — no browser's MSE decoder
+    // supports that, so playback fails asynchronously deep in the decode
+    // pipeline with zero diagnostic info (native SourceBuffer 'error' event,
+    // not a catchable append() exception). Forces standard 8-bit 4:2:0
+    // output regardless of the source's bit depth/chroma.
+    '-pix_fmt', 'yuv420p',
     '-c:a', 'aac',
     '-sc_threshold', '0',
     '-force_key_frames', `expr:gte(t,n_forced*${SEGMENT_SECONDS})`,

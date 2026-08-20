@@ -9,6 +9,27 @@ import Hls from 'hls.js';
 
 const SPEED_OPTIONS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
 
+// Recursively dumps an object for console logging without hand-picking
+// fields (which has already guessed wrong once for hls.js error data) and
+// without crashing on circular refs / DOM nodes / Error instances that a
+// blind JSON.stringify chokes on.
+function safeDump(value, depth = 0, seen = new WeakSet()) {
+  if (value === null || typeof value !== 'object') return value;
+  if (typeof value === 'function') return '[Function]';
+  if (value instanceof Error) return { name: value.name, message: value.message };
+  if (depth >= 3) return Array.isArray(value) ? '[Array]' : '[Object]';
+  if (typeof Node !== 'undefined' && value instanceof Node) return `[DOMNode ${value.nodeName}]`;
+  if (seen.has(value)) return '[Circular]';
+  seen.add(value);
+  if (Array.isArray(value)) return value.slice(0, 20).map(v => safeDump(v, depth + 1, seen));
+  const out = {};
+  for (const key of Object.keys(value)) {
+    try { out[key] = safeDump(value[key], depth + 1, seen); }
+    catch { out[key] = '[Unreadable]'; }
+  }
+  return out;
+}
+
 const VideoPlayer = forwardRef(function VideoPlayer({
   videoUrl,
   isHost,
@@ -371,17 +392,12 @@ const VideoPlayer = forwardRef(function VideoPlayer({
       let mediaRecoveries = 0;
       hls.on(Hls.Events.ERROR, (event, data) => {
         if (data.fatal) {
-          // data.type/details alone don't say WHY — the native error message,
-          // mimeType, and which fragment it choked on are what actually
-          // narrow down bufferAppendError (malformed segment vs. browser
-          // SourceBuffer quota vs. something else entirely).
-          console.error('[HLS] Fatal error:', data.type, data.details, {
-            reason: data.reason,
-            nativeError: data.err?.message,
-            mimeType: data.mimeType,
-            buffer: data.buffer,
-            frag: data.frag ? { sn: data.frag.sn, level: data.frag.level, url: data.frag.url } : undefined,
-          });
+          // Hand-picking fields (reason/err/mimeType/frag) guessed wrong once
+          // already — a bufferAppendError from a different internal hls.js
+          // path populated none of them. Dump every own key hls.js actually
+          // set instead of guessing which ones matter, with a depth cap and
+          // circular-ref guard since some (frag, buffer) nest DOM/event refs.
+          console.error('[HLS] Fatal error:', data.type, data.details, safeDump(data));
           if (data.type === Hls.ErrorTypes.NETWORK_ERROR && networkRecoveries < 5) {
             networkRecoveries++;
             setTimeout(() => {
