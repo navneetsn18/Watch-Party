@@ -23,6 +23,14 @@ function formatDuration(seconds) {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
+function transcodeEta(task) {
+  if (!task.expectedSegments || !task.transcodeStartedAt || !task.tsCreated) return null;
+  const elapsed = (Date.now() - task.transcodeStartedAt) / 1000;
+  const rate = task.tsCreated / elapsed; // segments/sec
+  if (rate <= 0) return null;
+  return (task.expectedSegments - task.tsCreated) / rate;
+}
+
 const STATE_LABELS = {
   uploading: 'Copying to library',
   transcoding: 'Converting to HLS',
@@ -391,7 +399,11 @@ export default function UploadPage() {
                   <span className="text-[10px] text-zinc-500 font-mono mt-0.5">
                     {task.retrying ? `Retrying (attempt ${task.attempt})...` : (STATE_LABELS[task.state] || task.state)}
                     {task.state === 'uploading' && ` • ${formatBytes(task.uploadedBytes)} / ${formatBytes(task.size)} • ${formatBytes(task.speed)}/s • ETA ${task.eta !== null ? formatDuration(task.eta) : '—'}`}
-                    {task.state === 'transcoding' && ` • ${task.tsCreated || 0} segments created`}
+                    {task.state === 'transcoding' && (
+                      task.expectedSegments
+                        ? ` • ${task.tsCreated || 0} / ${task.expectedSegments} segments (${Math.min(100, Math.round(((task.tsCreated || 0) / task.expectedSegments) * 100))}%) • ETA ${formatDuration(transcodeEta(task))}`
+                        : ` • ${task.tsCreated || 0} segments created`
+                    )}
                   </span>
                   {task.state === 'error' && task.error && (
                     <span className="text-[11px] text-red-400 mt-1 leading-snug">{task.error}</span>
@@ -426,7 +438,14 @@ export default function UploadPage() {
               )}
               {task.state === 'transcoding' && (
                 <div className="w-full h-2 bg-zinc-950 rounded-full overflow-hidden border border-zinc-900">
-                  <div className="h-full w-1/3 bg-gradient-to-r from-emerald-500 to-teal-500 rounded-full animate-pulse" />
+                  {task.expectedSegments ? (
+                    <div
+                      className="h-full bg-gradient-to-r from-emerald-500 to-teal-500 rounded-full transition-[width] duration-500 ease-out"
+                      style={{ width: `${Math.min(100, Math.round(((task.tsCreated || 0) / task.expectedSegments) * 100))}%` }}
+                    />
+                  ) : (
+                    <div className="h-full w-1/3 bg-gradient-to-r from-emerald-500 to-teal-500 rounded-full animate-pulse" />
+                  )}
                 </div>
               )}
             </div>

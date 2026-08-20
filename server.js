@@ -550,6 +550,7 @@ function transcodeToHls(uploadId, inputPath, filename, encoder = HW_ENCODER) {
 
   const durationSeconds = probeDurationSeconds(inputPath);
   const expectedSegments = durationSeconds ? Math.ceil(durationSeconds / SEGMENT_SECONDS) : null;
+  uploads[uploadId].expectedSegments = expectedSegments;
 
   log('HLS', `Transcoding start: ${filename} (${encoder || 'libx264'}, forced keyframes)`
     + (durationSeconds ? ` — duration ${formatHMS(durationSeconds)}, ~${expectedSegments} segments expected` : ''));
@@ -564,7 +565,7 @@ function transcodeToHls(uploadId, inputPath, filename, encoder = HW_ENCODER) {
     try {
       const tsCreated = fs.readdirSync(hlsDir).filter(f => f.endsWith('.ts')).length;
       uploads[uploadId].tsCreated = tsCreated;
-      io.emit('transcode-progress', { uploadId, filename, status: 'transcoding', tsCreated });
+      io.emit('transcode-progress', { uploadId, filename, status: 'transcoding', tsCreated, expectedSegments });
       if (tsCreated > 0 && tsCreated !== lastLoggedCount && tsCreated % logStep === 0) {
         lastLoggedCount = tsCreated;
         const elapsedSec = (Date.now() - startedAt) / 1000;
@@ -630,6 +631,7 @@ app.get('/api/upload/status/:uploadId', (req, res) => {
     filename: upload.filename,
     errorMessage: upload.errorMessage || '',
     tsCreated: upload.tsCreated || 0,
+    expectedSegments: upload.expectedSegments || null,
   });
 });
 
