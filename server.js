@@ -56,6 +56,35 @@ try {
   // fine without it — transcode logs just skip the ETA/segment-total math
 }
 
+// Detect a GPU H.264 encoder — software x264 is single-engine-per-core and
+// is what makes transcodes slow; hardware encode is commonly 5-10x faster.
+// Order matters: prefer the encoder actually built for this platform's GPU.
+let HW_ENCODER = null;
+if (FFMPEG_PATH) {
+  try {
+    const encoders = spawnSync(FFMPEG_PATH, ['-hide_banner', '-encoders'], { encoding: 'utf-8' }).stdout || '';
+    const candidates = process.platform === 'darwin'
+      ? ['h264_videotoolbox']
+      : ['h264_nvenc', 'h264_qsv', 'h264_amf']; // Nvidia, Intel, AMD — Windows/Linux
+    HW_ENCODER = candidates.find(name => encoders.includes(name)) || null;
+    log('BOOT', HW_ENCODER ? `GPU encoder available: ${HW_ENCODER}` : 'No GPU encoder found — using software x264');
+  } catch {
+    log('BOOT', 'GPU encoder detection failed — using software x264');
+  }
+}
+
+// Per-encoder args to hit a similar quality/bitrate target. GPU encoders
+// don't share x264's -preset/-crf semantics, so each gets its own knobs.
+function videoEncodeArgs(encoder) {
+  switch (encoder) {
+    case 'h264_nvenc': return ['-c:v', 'h264_nvenc', '-preset', 'p4', '-rc', 'vbr', '-cq', '23', '-b:v', '0'];
+    case 'h264_qsv': return ['-c:v', 'h264_qsv', '-preset', 'veryfast', '-global_quality', '23'];
+    case 'h264_amf': return ['-c:v', 'h264_amf', '-quality', 'speed', '-rc', 'cqp', '-qp_i', '23', '-qp_p', '23'];
+    case 'h264_videotoolbox': return ['-c:v', 'h264_videotoolbox', '-q:v', '65'];
+    default: return ['-c:v', 'libx264', '-preset', 'superfast', '-crf', '22', '-threads', '0'];
+  }
+}
+
 const requireAuth = (req, res, nextFn) => {
   const authHeader = req.headers.authorization;
   const token = authHeader && authHeader.split(' ')[1];
@@ -485,26 +514,22 @@ function probeDurationSeconds(filePath) {
   }
 }
 
-function transcodeToHls(uploadId, inputPath, filename) {
-  const baseName = path.parse(filename).name;
-  const hlsDir = path.join(HLS_DIR, baseName);
-  fs.mkdirSync(hlsDir, { recursive: true });
-  const hlsOutput = path.join(hlsDir, 'index.m3u8');
-  const SEGMENT_SECONDS = 4;
+const SEGMENT_SECONDS = 4;
 
-  // Always re-encode, never codec-copy. Stream-copy can only cut a segment
-  // at an existing keyframe, so with sparse/irregular keyframe intervals
-  // (common in web-released rips) `-hls_time` is just a suggestion —
-  // segments end up anywhere from under a second to 10+ seconds long. Some
-  // of those malformed/too-short segments fail hls.js's transmux/append
-  // outright (fatal "bufferAppendError", first fragment, every time — not a
-  // transient error, doesn't recover on retry). Forcing a real keyframe on
-  // every exact SEGMENT_SECONDS boundary guarantees uniform, clean segments
-  // regardless of source encoding. Costs transcode time instead of being
-  // near-instant, but the raw file is already watchable in the meantime.
-  const ffmpegArgs = [
+// Always re-encode, never codec-copy. Stream-copy can only cut a segment at
+// an existing keyframe, so with sparse/irregular keyframe intervals (common
+// in web-released rips) `-hls_time` is just a suggestion — segments end up
+// anywhere from under a second to 10+ seconds long, and some of those
+// malformed/too-short segments fail hls.js's transmux/append outright
+// (fatal "bufferAppendError", first fragment, every time — not transient,
+// doesn't recover on retry). Forcing a real keyframe on every exact
+// SEGMENT_SECONDS boundary guarantees uniform, clean segments regardless of
+// source encoding.
+function buildFfmpegArgs(inputPath, hlsDir, hlsOutput, encoder) {
+  return [
     '-i', inputPath,
-    '-c:v', 'libx264', '-c:a', 'aac', '-preset', 'veryfast', '-crf', '22',
+    ...videoEncodeArgs(encoder),
+    '-c:a', 'aac',
     '-sc_threshold', '0',
     '-force_key_frames', `expr:gte(t,n_forced*${SEGMENT_SECONDS})`,
     '-start_number', '0',
@@ -514,11 +539,19 @@ function transcodeToHls(uploadId, inputPath, filename) {
     '-f', 'hls',
     hlsOutput,
   ];
+}
+
+function transcodeToHls(uploadId, inputPath, filename, encoder = HW_ENCODER) {
+  const baseName = path.parse(filename).name;
+  const hlsDir = path.join(HLS_DIR, baseName);
+  fs.mkdirSync(hlsDir, { recursive: true });
+  const hlsOutput = path.join(hlsDir, 'index.m3u8');
+  const ffmpegArgs = buildFfmpegArgs(inputPath, hlsDir, hlsOutput, encoder);
 
   const durationSeconds = probeDurationSeconds(inputPath);
   const expectedSegments = durationSeconds ? Math.ceil(durationSeconds / SEGMENT_SECONDS) : null;
 
-  log('HLS', `Transcoding start: ${filename} (h264/aac re-encode, forced keyframes)`
+  log('HLS', `Transcoding start: ${filename} (${encoder || 'libx264'}, forced keyframes)`
     + (durationSeconds ? ` — duration ${formatHMS(durationSeconds)}, ~${expectedSegments} segments expected` : ''));
 
   const startedAt = Date.now();
@@ -563,13 +596,20 @@ function transcodeToHls(uploadId, inputPath, filename) {
     const totalElapsed = formatHMS((Date.now() - startedAt) / 1000);
     if (code === 0) {
       uploads[uploadId].status = 'complete';
-      // Fast transcodes (small file, codec-copy) can finish before the first
-      // 1s progress tick ever runs — re-count from disk instead of trusting
-      // the possibly-still-zero cached value.
+      // Fast transcodes can finish before the first 1s progress tick ever
+      // runs — re-count from disk instead of trusting the possibly-still-
+      // zero cached value.
       let finalCount = uploads[uploadId].tsCreated || 0;
       try { finalCount = fs.readdirSync(hlsDir).filter(f => f.endsWith('.ts')).length; } catch {}
       log('HLS', `Complete: ${filename} — ${finalCount} segments in ${totalElapsed}`);
       io.emit('transcode-complete', { uploadId, filename });
+    } else if (encoder) {
+      // GPU encode failed (driver/config issue, VRAM limit, unsupported
+      // profile, etc) — don't just give up, retry once in software so a
+      // flaky GPU path never turns into "video never gets HLS at all".
+      logErr('HLS', `GPU encoder ${encoder} failed (code ${code}) on ${filename} after ${totalElapsed}, retrying in software:\n${stderrTail}`);
+      try { fs.rmSync(hlsDir, { recursive: true, force: true }); } catch {}
+      transcodeToHls(uploadId, inputPath, filename, null);
     } else {
       uploads[uploadId].status = 'error';
       uploads[uploadId].errorMessage = `FFmpeg exited with code ${code}`;
@@ -1239,6 +1279,6 @@ nextApp.prepare().then(() => {
 
   server.listen(PORT, () => {
     console.log(`\n🎬 Watch Party (offline edition) on http://localhost:${PORT}`);
-    console.log(`   Data: ./data/watchparty.db | Videos: ./videos | FFmpeg: ${FFMPEG_PATH ? 'yes' : 'no'}\n`);
+    console.log(`   Data: ./data/watchparty.db | Videos: ./videos | FFmpeg: ${FFMPEG_PATH ? 'yes' : 'no'} | GPU encode: ${HW_ENCODER || 'no'}\n`);
   });
 });
