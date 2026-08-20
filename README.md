@@ -116,6 +116,9 @@ It's a raw MKV/AVI with DTS or AC3 audio, and HLS hasn't finished (or ffmpeg is 
 **"Transcoding takes forever"**
 All inputs re-encode (roughly 0.5-2x the movie's duration depending on your machine) so every HLS segment gets a clean forced keyframe, regardless of the source's own keyframe spacing. It runs in the background; the video is watchable raw meanwhile.
 
+**"A video plays for some people but shows 'Video can't be played' for others"**
+Its HLS folder is missing a segment or the transcode got interrupted (crash, killed process mid-run). The server checks this on every play attempt and automatically falls back to raw streaming instead of letting the browser retry a dead segment forever — check the terminal for a `[HLS] Manifest for ... is broken` line naming the exact problem, then hit the refresh icon on that video in Profile > My Videos to rebuild it.
+
 **"I want to start over"**
 ```bash
 rm -rf data videos public/uploads

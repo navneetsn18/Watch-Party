@@ -1,7 +1,7 @@
 'use client';
 
 import { useRef, useState, useEffect, useCallback, forwardRef, useImperativeHandle } from 'react';
-import { Play, Pause, RotateCcw, RotateCw, Volume2, VolumeX, Maximize2, Sparkles, Loader2, HelpCircle, ShieldAlert, Captions } from 'lucide-react';
+import { Play, Pause, RotateCcw, RotateCw, Volume2, VolumeX, Maximize2, Sparkles, Loader2, HelpCircle, ShieldAlert, Captions, VideoOff, RefreshCw } from 'lucide-react';
 import { formatTime } from '../lib/utils';
 import EmojiReactions, { useEmojiSpawner } from './EmojiReactions';
 import GuestRequestModal from './GuestRequestModal';
@@ -79,6 +79,8 @@ const VideoPlayer = forwardRef(function VideoPlayer({
   const [playbackRate, setPlaybackRate] = useState(1);
   const [speedMenuOpen, setSpeedMenuOpen] = useState(false);
   const [activeSubtitleId, setActiveSubtitleId] = useState(null);
+  const [hlsFatalError, setHlsFatalError] = useState(null);
+  const [reloadNonce, setReloadNonce] = useState(0);
   const [subtitleMenuOpen, setSubtitleMenuOpen] = useState(false);
 
   // Preview thumbnail state
@@ -375,7 +377,11 @@ const VideoPlayer = forwardRef(function VideoPlayer({
         backBufferLength: 300,
         startLevel: -1,
         enableWorker: true,
-        fragLoadingMaxRetry: 6,
+        // 5 requests per "round" (1 initial + 4 retries) x 2 rounds below
+        // (1 initial load + 1 network recovery) = 10 requests max for a
+        // segment that's genuinely missing/corrupt, then give up with a
+        // visible error instead of hammering the server indefinitely.
+        fragLoadingMaxRetry: 4,
         fragLoadingRetryDelay: 1000,
         fragLoadingMaxRetryDelay: 8000,
       });
@@ -398,7 +404,7 @@ const VideoPlayer = forwardRef(function VideoPlayer({
           // set instead of guessing which ones matter, with a depth cap and
           // circular-ref guard since some (frag, buffer) nest DOM/event refs.
           console.error('[HLS] Fatal error:', data.type, data.details, safeDump(data));
-          if (data.type === Hls.ErrorTypes.NETWORK_ERROR && networkRecoveries < 5) {
+          if (data.type === Hls.ErrorTypes.NETWORK_ERROR && networkRecoveries < 1) {
             networkRecoveries++;
             setTimeout(() => {
               if (hlsRef.current === hls) hls.startLoad();
@@ -415,6 +421,11 @@ const VideoPlayer = forwardRef(function VideoPlayer({
             console.error('[HLS] Giving up after repeated fatal errors:', data.details);
             hls.destroy();
             if (hlsRef.current === hls) hlsRef.current = null;
+            setHlsFatalError(
+              data.type === Hls.ErrorTypes.NETWORK_ERROR
+                ? 'A video segment failed to load repeatedly. It may be missing or corrupted on the server.'
+                : "This video's file appears to be corrupted and can't be played."
+            );
           }
         }
       });
@@ -430,6 +441,7 @@ const VideoPlayer = forwardRef(function VideoPlayer({
     setBuffered(0);
     setPlaying(false);
     setActiveSubtitleId(null);
+    setHlsFatalError(null);
 
     return () => {
       if (hlsRef.current) {
@@ -437,7 +449,7 @@ const VideoPlayer = forwardRef(function VideoPlayer({
         hlsRef.current = null;
       }
     };
-  }, [videoUrl]);
+  }, [videoUrl, reloadNonce]);
 
   // Sync the browser's native TextTrack rendering with the selected subtitle.
   // <track> order matches the `subtitles` array order.
@@ -766,6 +778,22 @@ const VideoPlayer = forwardRef(function VideoPlayer({
 
       {/* Floating Emoji Canvas */}
       <EmojiReactions canvasRef={canvasRef} />
+
+      {/* Fatal playback error — hls.js gave up after the retry cap */}
+      {hlsFatalError && (
+        <div className="absolute inset-0 bg-[#07070a] flex flex-col items-center justify-center gap-3 text-center p-8 z-40">
+          <VideoOff className="w-10 h-10 text-red-400" />
+          <p className="text-sm font-semibold text-zinc-200 max-w-md">Video can't be played</p>
+          <p className="text-xs text-zinc-500 max-w-md leading-relaxed">{hlsFatalError}</p>
+          <button
+            onClick={() => { setHlsFatalError(null); setReloadNonce(n => n + 1); }}
+            className="mt-2 flex items-center gap-1.5 px-4 py-2 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-xs font-semibold text-zinc-300 hover:text-white cursor-pointer transition-colors"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            <span>Try again</span>
+          </button>
+        </div>
+      )}
 
       {/* Buffering Indicator */}
       {(isBuffering || hostBuffering) && (

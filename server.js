@@ -272,12 +272,44 @@ app.get('/api/video-url', (req, res) => {
   }));
 
   const baseName = path.parse(baseFilename).name;
-  const hlsManifest = path.join(HLS_DIR, baseName, 'index.m3u8');
+  const hlsDir = path.join(HLS_DIR, baseName);
+  const hlsManifest = path.join(hlsDir, 'index.m3u8');
   if (fs.existsSync(hlsManifest)) {
-    return res.json({ url: `/api/hls/${encodeURIComponent(baseName)}/index.m3u8`, source: 'hls', subtitles });
+    const check = checkHlsComplete(hlsDir, hlsManifest);
+    if (check.ok) {
+      return res.json({ url: `/api/hls/${encodeURIComponent(baseName)}/index.m3u8`, source: 'hls', subtitles });
+    }
+    // Don't hand the client a manifest it'll fail to play — a segment gone
+    // missing (interrupted transcode, disk cleanup, manual edit) means every
+    // viewer would otherwise discover this the hard way, one stuck retry
+    // loop at a time. Fall back to the raw file instead.
+    logErr('HLS', `Manifest for ${baseName} is broken (${check.reason}) — falling back to raw stream. Re-transcode from Profile > My Videos to fix.`);
   }
   res.json({ url: `/api/stream/${encodeURIComponent(baseFilename)}`, source: 'local', subtitles });
 });
+
+// Verifies a manifest is actually playable: fully written (ends with
+// #EXT-X-ENDLIST — absent if the transcode was interrupted mid-run) and
+// every segment it lists is actually present on disk.
+function checkHlsComplete(hlsDir, manifestPath) {
+  let text;
+  try { text = fs.readFileSync(manifestPath, 'utf-8'); }
+  catch (err) { return { ok: false, reason: `manifest unreadable: ${err.message}` }; }
+
+  if (!text.includes('#EXT-X-ENDLIST')) {
+    return { ok: false, reason: 'no #EXT-X-ENDLIST — transcode never finished' };
+  }
+
+  const segmentNames = text.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
+  if (segmentNames.length === 0) {
+    return { ok: false, reason: 'manifest lists no segments' };
+  }
+  const missing = segmentNames.filter(name => !fs.existsSync(path.join(hlsDir, name)));
+  if (missing.length > 0) {
+    return { ok: false, reason: `${missing.length}/${segmentNames.length} segment(s) missing, e.g. ${missing[0]}` };
+  }
+  return { ok: true };
+}
 
 // Serve a subtitle file (WebVTT) by its stored filename
 app.get('/api/subs/:filename', (req, res) => {
