@@ -89,7 +89,14 @@ function videoEncodeArgs(encoder) {
     case 'h264_qsv': return ['-c:v', 'h264_qsv', '-preset', 'veryfast', '-global_quality', '23', '-bf', '0'];
     case 'h264_amf': return ['-c:v', 'h264_amf', '-quality', 'speed', '-rc', 'cqp', '-qp_i', '23', '-qp_p', '23', '-bf', '0'];
     case 'h264_videotoolbox': return ['-c:v', 'h264_videotoolbox', '-q:v', '65'];
-    default: return ['-c:v', 'libx264', '-preset', 'superfast', '-crf', '22', '-threads', '0'];
+    // ultrafast over superfast specifically because GPU encoding (the
+    // actual fix for "software transcode takes hours" on a feature-length
+    // movie) can't be relied on — NVENC/QSV/AMF can fail to even open a
+    // session for reasons entirely outside this app's control (another app
+    // holding the GPU encode session, driver issues, AV blocking the
+    // unsigned ffmpeg binary) — and this is the path everyone lands on
+    // when that happens.
+    default: return ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '23', '-threads', '0'];
   }
 }
 
