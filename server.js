@@ -289,10 +289,15 @@ app.get('/api/video-url', (req, res) => {
   const baseName = path.parse(baseFilename).name;
   const hlsDir = path.join(HLS_DIR, baseName);
   const hlsManifest = path.join(hlsDir, 'index.m3u8');
+  const rawUrl = `/api/stream/${encodeURIComponent(baseFilename)}`;
   if (fs.existsSync(hlsManifest)) {
     const check = checkHlsComplete(hlsDir, hlsManifest);
     if (check.ok) {
-      return res.json({ url: `/api/hls/${encodeURIComponent(baseName)}/index.m3u8`, source: 'hls', subtitles });
+      // fallbackUrl: even a manifest that passes the completeness check can
+      // still fail at actual playback time (a codec/browser-decoder problem
+      // the check can't detect, only real playback can) — the player uses
+      // this to recover automatically instead of just erroring out.
+      return res.json({ url: `/api/hls/${encodeURIComponent(baseName)}/index.m3u8`, source: 'hls', subtitles, fallbackUrl: rawUrl });
     }
     // Don't hand the client a manifest it'll fail to play — a segment gone
     // missing (interrupted transcode, disk cleanup, manual edit) means every

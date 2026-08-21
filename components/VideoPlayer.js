@@ -47,6 +47,7 @@ const VideoPlayer = forwardRef(function VideoPlayer({
   onApproveRequest,
   onRejectRequest,
   subtitles = [],
+  fallbackUrl,
 }, ref) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -54,6 +55,7 @@ const VideoPlayer = forwardRef(function VideoPlayer({
   const skipRef = useRef(null);
   const playStateRef = useRef(null);
   const hlsRef = useRef(null);
+  const usedFallbackRef = useRef(false);
 
   // Preview thumbnail refs
   const previewVideoRef = useRef(null);
@@ -421,11 +423,30 @@ const VideoPlayer = forwardRef(function VideoPlayer({
             console.error('[HLS] Giving up after repeated fatal errors:', data.details);
             hls.destroy();
             if (hlsRef.current === hls) hlsRef.current = null;
-            setHlsFatalError(
-              data.type === Hls.ErrorTypes.NETWORK_ERROR
-                ? 'A video segment failed to load repeatedly. It may be missing or corrupted on the server.'
-                : "This video's file appears to be corrupted and can't be played."
-            );
+
+            // HLS is broken for reasons a manifest-completeness check can't
+            // catch (bad codec params, browser decoder quirks) — the raw
+            // file is a different code path entirely (plain <video> +
+            // native range-streaming, no segmenting/muxing involved) and
+            // often just plays fine even when HLS doesn't. Try it before
+            // giving up on the video outright.
+            if (fallbackUrl && !usedFallbackRef.current) {
+              usedFallbackRef.current = true;
+              console.warn('[HLS] Falling back to raw file playback:', fallbackUrl);
+              video.addEventListener('loadeddata', () => console.log('[HLS] Raw fallback loaded successfully'), { once: true });
+              video.addEventListener('error', () => {
+                console.error('[HLS] Raw fallback also failed');
+                setHlsFatalError("This video's file appears to be corrupted and can't be played, even as a raw file.");
+              }, { once: true });
+              video.src = fallbackUrl;
+              video.load();
+            } else {
+              setHlsFatalError(
+                data.type === Hls.ErrorTypes.NETWORK_ERROR
+                  ? 'A video segment failed to load repeatedly. It may be missing or corrupted on the server.'
+                  : "This video's file appears to be corrupted and can't be played."
+              );
+            }
           }
         }
       });
@@ -442,6 +463,7 @@ const VideoPlayer = forwardRef(function VideoPlayer({
     setPlaying(false);
     setActiveSubtitleId(null);
     setHlsFatalError(null);
+    usedFallbackRef.current = false;
 
     return () => {
       if (hlsRef.current) {

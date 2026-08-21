@@ -67,6 +67,7 @@ function RoomContent({ roomId }) {
   const [queue, setQueue] = useState([]);
   const [guestControls, setGuestControls] = useState(true);
   const [videoUrl, setVideoUrl] = useState(null);
+  const [videoFallbackUrl, setVideoFallbackUrl] = useState(null);
   const [subtitles, setSubtitles] = useState([]);
   const [currentVideoKey, setCurrentVideoKey] = useState(null);
   const [videos, setVideos] = useState([]);
@@ -123,6 +124,7 @@ function RoomContent({ roomId }) {
     // YouTube keys need no URL resolution — the player embeds the ID directly
     if (key.startsWith('youtube:')) {
       setVideoUrl(null);
+      setVideoFallbackUrl(null);
       setSubtitles([]);
       return true;
     }
@@ -137,6 +139,7 @@ function RoomContent({ roomId }) {
       });
       const data = await res.json();
       setVideoUrl(data.url);
+      setVideoFallbackUrl(data.fallbackUrl || null);
       setSubtitles(data.subtitles || []);
       return true;
     } catch (err) {
@@ -626,6 +629,7 @@ function RoomContent({ roomId }) {
               onApproveRequest={handleApproveRequest}
               onRejectRequest={handleRejectRequest}
               subtitles={subtitles}
+              fallbackUrl={videoFallbackUrl}
             />
           )}
         </div>
