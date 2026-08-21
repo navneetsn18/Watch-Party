@@ -585,6 +585,15 @@ function buildFfmpegArgs(inputPath, hlsDir, hlsOutput, encoder) {
     // not a catchable append() exception). Forces standard 8-bit 4:2:0
     // output regardless of the source's bit depth/chroma.
     '-pix_fmt', 'yuv420p',
+    // Same class of bug as pix_fmt: a 5.1/6-channel source (EAC3/AC3/DTS
+    // surround, common on WEB-DL/BluRay rips) re-encoded with ffmpeg's
+    // native AAC encoder and no -ac produces 6-channel AAC tagged
+    // channel_layout=unknown — confirmed via ffprobe. Browsers' MSE AAC
+    // decoders reliably support stereo; multichannel AAC like that fails
+    // to decode async with zero catchable error, on the very first
+    // segment (decoder needs to init channel config at stream start) —
+    // exactly this symptom. Force a stereo downmix.
+    '-ac', '2',
     '-c:a', 'aac',
     '-sc_threshold', '0',
     '-force_key_frames', `expr:gte(t,n_forced*${SEGMENT_SECONDS})`,
