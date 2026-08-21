@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { ArrowLeft, UploadCloud, Video, AlertCircle, CheckCircle, Layers, Cpu, RefreshCw as SpinnerIcon, Link2, Loader2, X } from 'lucide-react';
+import { ArrowLeft, UploadCloud, Video, AlertCircle, CheckCircle, Layers, Cpu, RefreshCw as SpinnerIcon, Link2, Loader2, X, FolderSearch } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { startUpload, subscribeUploads, getUploadTasks, cancelUpload, dismissUpload } from '../../lib/uploadManager';
 
@@ -42,6 +42,8 @@ const STATE_LABELS = {
 export default function UploadPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
+  const [scanning, setScanning] = useState(false);
+  const [scanResult, setScanResult] = useState('');
   const [file, setFile] = useState(null);
   const [dragOver, setDragOver] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
@@ -86,6 +88,30 @@ export default function UploadPage() {
       return 'File size exceeds the 100 GB upload limit.';
     }
     return null;
+  }
+
+  async function handleScan() {
+    setScanning(true);
+    setScanResult('');
+    try {
+      const session = await supabase.auth.getSession();
+      const token = session.data.session?.access_token;
+      const res = await fetch('/api/videos/scan', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Scan failed');
+      setScanResult(
+        data.added.length === 0
+          ? `Scanned ${data.scanned} file(s) — nothing new.`
+          : `Found and registered ${data.added.length} new file(s): ${data.added.map(v => v.displayName).join(', ')}. Transcoding in the background.`
+      );
+    } catch (err) {
+      setScanResult('Error: ' + err.message);
+    } finally {
+      setScanning(false);
+    }
   }
 
   function handleFileSelect(f) {
@@ -151,15 +177,31 @@ export default function UploadPage() {
           <ArrowLeft className="w-4 h-4" />
           <span>Back to Lobby</span>
         </button>
-        <div>
-          <h1 className="text-3xl font-black text-white flex items-center gap-2.5 tracking-tight">
-            <UploadCloud className="w-7 h-7 text-violet-400" />
-            Upload Video
-          </h1>
-          <p className="text-sm text-zinc-400 mt-1.5">
-            Uploads run in the background — queue several and keep browsing while they finish
-          </p>
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div>
+            <h1 className="text-3xl font-black text-white flex items-center gap-2.5 tracking-tight">
+              <UploadCloud className="w-7 h-7 text-violet-400" />
+              Upload Video
+            </h1>
+            <p className="text-sm text-zinc-400 mt-1.5">
+              Uploads run in the background — queue several and keep browsing while they finish
+            </p>
+          </div>
+          <button
+            onClick={handleScan}
+            disabled={scanning}
+            title="Register any video files dropped directly into the videos/ folder (e.g. synced via Google Drive) without uploading them through the browser"
+            className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-xs font-semibold text-zinc-300 hover:text-white cursor-pointer transition-colors disabled:cursor-wait flex-shrink-0"
+          >
+            {scanning ? <Loader2 className="w-4 h-4 animate-spin" /> : <FolderSearch className="w-4 h-4" />}
+            <span>{scanning ? 'Scanning...' : 'Scan videos folder'}</span>
+          </button>
         </div>
+        {scanResult && (
+          <div className="p-3 rounded-xl border bg-violet-950/20 border-violet-900/35 text-violet-300 text-xs leading-relaxed">
+            {scanResult}
+          </div>
+        )}
       </div>
 
       {/* Upload form */}

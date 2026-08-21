@@ -431,6 +431,45 @@ app.post('/api/upload/thumbnail', express.json({ limit: '10mb' }), requireAuth, 
   }
 });
 
+// Scan VIDEOS_DIR for files that aren't registered in the DB yet and
+// register them — for files dropped directly into the folder (e.g. synced
+// via Google Drive on Colab) instead of going through the upload endpoint.
+// Each one gets HLS transcoding kicked off same as a normal upload.
+app.post('/api/videos/scan', requireAuth, (req, res) => {
+  try {
+    const onDisk = fs.readdirSync(VIDEOS_DIR).filter(f => /\.(mp4|webm|ogg|mov|mkv|avi)$/i.test(f));
+    const registered = new Set(store.listVideos().map(v => v.filename));
+    const newFiles = onDisk.filter(f => !registered.has(f));
+
+    const added = newFiles.map(filename => {
+      const videoId = crypto.randomUUID();
+      const displayName = path.parse(filename).name;
+      store.insertVideo({
+        filename,
+        id: videoId,
+        displayName,
+        uploaderId: req.user.id,
+        uploaderName: req.user.username,
+        isPrivate: 0,
+        thumbnailUrl: '',
+        createdAt: new Date().toISOString(),
+      });
+      log('VIDEO', `Scan found: ${filename} — registered as "${displayName}"`);
+      if (FFMPEG_PATH) {
+        const uploadId = crypto.randomUUID();
+        uploads[uploadId] = { filename, status: 'transcoding', tsCreated: 0, createdAt: Date.now() };
+        transcodeToHls(uploadId, path.join(VIDEOS_DIR, filename), filename);
+      }
+      return { filename, displayName, id: videoId };
+    });
+
+    res.json({ added, scanned: onDisk.length });
+  } catch (err) {
+    logErr('VIDEO', `Scan failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // The video upload itself: raw bytes streamed straight to disk — constant
 // memory regardless of file size. Metadata rides in query params.
 app.post('/api/upload/local', requireAuth, (req, res) => {

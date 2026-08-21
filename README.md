@@ -85,7 +85,7 @@ videos/subs/            subtitle .vtt files
 public/uploads/         avatars + thumbnails
 ```
 
-Pro tip: you can also just **drop video files into `videos/` manually**... except they won't be in the database, so don't. Upload through the app; it handles naming, transcoding, and registration.
+You *can* drop video files directly into `videos/` (e.g. synced in from Google Drive on a cloud runtime) instead of uploading through the browser — hit **Scan videos folder** on the Upload page afterward to register anything new and kick off its HLS transcode.
 
 ---
 
