@@ -77,9 +77,17 @@ if (FFMPEG_PATH) {
 // don't share x264's -preset/-crf semantics, so each gets its own knobs.
 function videoEncodeArgs(encoder) {
   switch (encoder) {
-    case 'h264_nvenc': return ['-c:v', 'h264_nvenc', '-preset', 'p4', '-rc', 'vbr', '-cq', '23', '-b:v', '0'];
-    case 'h264_qsv': return ['-c:v', 'h264_qsv', '-preset', 'veryfast', '-global_quality', '23'];
-    case 'h264_amf': return ['-c:v', 'h264_amf', '-quality', 'speed', '-rc', 'cqp', '-qp_i', '23', '-qp_p', '23'];
+    // -bf 0: B-frames can create decode references that cross an HLS
+    // segment boundary — each segment must decode standalone, and a GPU
+    // encoder's default GOP structure doesn't guarantee that the way
+    // libx264/VideoToolbox's -force_key_frames handling does. Disabling
+    // B-frames trades a little compression efficiency for segments that
+    // are always self-contained. -forced-idr on nvenc makes forced
+    // keyframes actual IDR frames (closed GOP), not just I-frames that
+    // can still reference across the boundary.
+    case 'h264_nvenc': return ['-c:v', 'h264_nvenc', '-preset', 'p4', '-rc', 'vbr', '-cq', '23', '-b:v', '0', '-bf', '0', '-forced-idr', '1'];
+    case 'h264_qsv': return ['-c:v', 'h264_qsv', '-preset', 'veryfast', '-global_quality', '23', '-bf', '0'];
+    case 'h264_amf': return ['-c:v', 'h264_amf', '-quality', 'speed', '-rc', 'cqp', '-qp_i', '23', '-qp_p', '23', '-bf', '0'];
     case 'h264_videotoolbox': return ['-c:v', 'h264_videotoolbox', '-q:v', '65'];
     default: return ['-c:v', 'libx264', '-preset', 'superfast', '-crf', '22', '-threads', '0'];
   }
