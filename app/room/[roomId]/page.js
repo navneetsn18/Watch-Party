@@ -86,6 +86,7 @@ function RoomContent({ roomId }) {
   const socketRef = useRef(null);
   const playerRef = useRef(null);
   const pendingSyncRef = useRef(null);
+  const seekPlayTimeoutRef = useRef(null);
   const showToast = useToast();
 
   const isHostRef = useRef(isHost);
@@ -294,11 +295,20 @@ function RoomContent({ roomId }) {
       const player = playerRef.current;
       if (player) {
         player.seek(currentTime);
-        if (playing) {
-          player.play();
-        } else {
-          player.pause();
-        }
+        // Asserting play/pause synchronously right after seek() races the
+        // seek's own async buffering side-effect (YouTube in particular can
+        // fire a transient state-change while it re-buffers around the new
+        // position) — a stale "already playing?" snapshot taken before that
+        // settles can make this a no-op even though the video ends up
+        // paused a moment later with nothing left to resume it. Give it a
+        // beat; a rapid run of seeks just re-schedules this, so only the
+        // last one's assertion actually fires.
+        if (seekPlayTimeoutRef.current) clearTimeout(seekPlayTimeoutRef.current);
+        seekPlayTimeoutRef.current = setTimeout(() => {
+          const p = playerRef.current;
+          if (!p) return;
+          playing ? p.play() : p.pause();
+        }, 2000);
       }
     });
 
@@ -310,11 +320,14 @@ function RoomContent({ roomId }) {
         const player = playerRef.current;
         if (player) {
           player.seek(currentTime);
-          if (playing) {
-            player.play();
-          } else {
-            player.pause();
-          }
+          // Same seek/play race as the 'seek' handler above — give the
+          // seek a beat to settle before asserting the final play state.
+          if (seekPlayTimeoutRef.current) clearTimeout(seekPlayTimeoutRef.current);
+          seekPlayTimeoutRef.current = setTimeout(() => {
+            const p = playerRef.current;
+            if (!p) return;
+            playing ? p.play() : p.pause();
+          }, 2000);
           player.setHostBuffering(!!hostBuffering);
         }
       };

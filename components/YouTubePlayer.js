@@ -54,6 +54,7 @@ const YouTubePlayer = forwardRef(function YouTubePlayer({
   const playingRef = useRef(false);
   const lastTimeRef = useRef(0);
   const lastPollWallRef = useRef(0);
+  const lastSeekAtRef = useRef(0);
 
   const suppressPlayRef = useRef(0);
   const suppressPauseRef = useRef(0);
@@ -186,6 +187,12 @@ const YouTubePlayer = forwardRef(function YouTubePlayer({
                 suppressPlayRef.current -= 1;
                 return;
               }
+              // YouTube's seekTo() can fire a transient PLAYING/PAUSED
+              // state-change as an internal side-effect of re-buffering
+              // around the new position — not a real user action. The UI
+              // above already reflects it either way; just don't broadcast
+              // it as if someone pressed play/pause.
+              if (Date.now() - lastSeekAtRef.current < 1200) return;
               if (canControlRef.current) onPlayRef.current?.(currentTimeSec());
             } else if (e.data === S.PAUSED) {
               playingRef.current = false;
@@ -194,6 +201,7 @@ const YouTubePlayer = forwardRef(function YouTubePlayer({
                 suppressPauseRef.current -= 1;
                 return;
               }
+              if (Date.now() - lastSeekAtRef.current < 1200) return;
               if (canControlRef.current) onPauseRef.current?.(currentTimeSec());
             } else if (e.data === S.ENDED) {
               playingRef.current = false;
@@ -293,6 +301,7 @@ const YouTubePlayer = forwardRef(function YouTubePlayer({
     if (!p || !readyRef.current || !canControlRef.current) return;
     lastTimeRef.current = time;
     lastPollWallRef.current = Date.now();
+    lastSeekAtRef.current = Date.now();
     setCurrentTime(time);
     try { p.seekTo(time, true); } catch {}
     onSeekRef.current?.(time);
@@ -406,7 +415,7 @@ const YouTubePlayer = forwardRef(function YouTubePlayer({
       // VideoPlayer's muted-retry fallback.
       setTimeout(() => {
         if (!playingRef.current) {
-          try { p.mute(); p.playVideo(); } catch {}
+          try { p.mute(); p.playVideo(); setMuted(true); } catch {}
         }
       }, 1200);
     },
@@ -422,6 +431,7 @@ const YouTubePlayer = forwardRef(function YouTubePlayer({
       suppressSeekRef.current += 1;
       lastTimeRef.current = time;
       lastPollWallRef.current = Date.now();
+      lastSeekAtRef.current = Date.now();
       try { p.seekTo(time, true); } catch {}
     },
     setHostBuffering: (buffering) => setHostBufferingState(!!buffering),
